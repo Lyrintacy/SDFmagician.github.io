@@ -2,7 +2,7 @@
 // SDF Magician — application bootstrap & UI
 // ═══════════════════════════════════════════════════════════════
 
-import { SHAPES, SHAPE_CATEGORIES, getShape, evalScene } from './shapes.js';
+import { SHAPES, SHAPE_CATEGORIES, SHAPE_HANDLES, getShape, evalScene } from './shapes.js';
 import { buildExport } from './glsl.js';
 import { SDFRenderer } from './renderer.js';
 import { model, BLEND_MODES, findItem, PRESETS } from './model.js';
@@ -10,8 +10,12 @@ import { model, BLEND_MODES, findItem, PRESETS } from './model.js';
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => [...document.querySelectorAll(sel)];
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+const round4 = (v) => Math.round(v * 10000) / 10000;
 const slugify = (s) => (s || 'scene').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '') || 'scene';
 const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
+const isEditableTarget = (t) => t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable);
+const escapeAttr = (s) => String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+const escapeHtml = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
 // ═══════════════ camera / viewport state ═══════════════
 
@@ -30,17 +34,15 @@ try {
   renderer = new SDFRenderer(glCanvas);
 } catch (err) {
   viewport.insertAdjacentHTML('afterbegin',
-    `<div style="position:absolute;inset:0;z-index:9;display:grid;place-items:center;color:#fecdd3;background:#0b1020;padding:30px;text-align:center;font:500 13px/1.7 Inter">
+    `<div style="position:absolute;inset:0;z-index:9;display:grid;place-items:center;color:#fecdd3;background:#0b0b0c;padding:30px;text-align:center;font:500 13px/1.7 Inter">
        WebGL could not start:<br>${String(err.message || err)}</div>`);
 }
 
 let needsRender = true;
+let rendererAnimating = false;
 const requestRender = () => { needsRender = true; };
-const requestOverlay = requestRender;
 
-function computeFitScale() {
-  return Math.min(cssW, cssH) / 4.8;
-}
+function computeFitScale() { return Math.min(cssW, cssH) / 4.8; }
 
 function fitView() {
   camera.cx = 0; camera.cy = 0;
@@ -75,15 +77,29 @@ const screenToWorld = (sx, sy) => ({
   x: (sx - cssW / 2) / camera.scale + camera.cx,
   y: (cssH / 2 - sy) / camera.scale + camera.cy,
 });
+// item-local frame ↔ world (groups are pure containers now — no group transform)
+const itemLocalToWorld = (item, lx, ly) => {
+  const T = item.transform;
+  const a = (T.rotation || 0) * Math.PI / 180;
+  const c = Math.cos(a), s = Math.sin(a), sc = T.scale || 1;
+  return { x: T.x + (c * lx - s * ly) * sc, y: T.y + (s * lx + c * ly) * sc };
+};
+const worldToItemLocal = (item, wx, wy) => {
+  const T = item.transform;
+  const dx = wx - T.x, dy = wy - T.y;
+  const a = -((T.rotation || 0) * Math.PI / 180);
+  const c = Math.cos(a), s = Math.sin(a), sc = T.scale || 1;
+  return { x: (c * dx - s * dy) / sc, y: (s * dx + c * dy) / sc };
+};
 
 // ═══════════════ render loop ═══════════════
 
 function draw() {
-  if (!needsRender) return;
-  needsRender = false;
   const scene = model.scene;
-  if (renderer) {
-    renderer.render({
+  const hasSelection = model.selectedIds.length > 0;
+  if (renderer && (needsRender || rendererAnimating)) {
+    rendererAnimating = renderer.render({
+      scene,
       center: { x: camera.cx, y: camera.cy },
       scale: camera.scale * dpr,
       falloff: scene.contour.falloff,
@@ -91,13 +107,16 @@ function draw() {
       lineEvery: scene.contour.lineEvery,
       lineStrength: scene.contour.lineStrength,
       colors: scene.colors,
-      selectedId: model.selectedId,
+      selectedIds: model.selectedIds,
+      // 50 % outline for the whole SDF when nothing is focused
+      boundaryAlpha: hasSelection ? 0.9 : 0.5,
     });
   }
-  drawOverlay();
+  if (needsRender || rendererAnimating) drawOverlay();
+  needsRender = false;
 }
 
-// ═══════════════ overlay: grid, axes, gizmos ═══════════════
+// ═══════════════ overlay: grid, gizmos, param handles ═══════════════
 
 function drawGrid() {
   const scene = model.scene;
@@ -114,20 +133,19 @@ function drawGrid() {
     for (let x = x0; x <= x1; x += step) {
       const sx = worldToScreen(x, 0).x;
       const isMajor = Math.abs(x / major - Math.round(x / major)) < 1e-6;
-      octx.strokeStyle = isMajor ? 'rgba(148,180,255,0.14)' : 'rgba(148,180,255,0.055)';
+      octx.strokeStyle = isMajor ? 'rgba(235,240,255,0.13)' : 'rgba(235,240,255,0.05)';
       octx.lineWidth = 1;
       octx.beginPath(); octx.moveTo(sx, 0); octx.lineTo(sx, cssH); octx.stroke();
     }
     for (let y = y0; y <= y1; y += step) {
       const sy = worldToScreen(0, y).y;
       const isMajor = Math.abs(y / major - Math.round(y / major)) < 1e-6;
-      octx.strokeStyle = isMajor ? 'rgba(148,180,255,0.14)' : 'rgba(148,180,255,0.055)';
+      octx.strokeStyle = isMajor ? 'rgba(235,240,255,0.13)' : 'rgba(235,240,255,0.05)';
       octx.beginPath(); octx.moveTo(0, sy); octx.lineTo(cssW, sy); octx.stroke();
     }
-    // unit labels on axes
     const labelStep = s >= 46 ? 1 : 5;
     octx.font = '9px "JetBrains Mono", monospace';
-    octx.fillStyle = 'rgba(154,162,199,0.5)';
+    octx.fillStyle = 'rgba(235,240,255,0.38)';
     if (scene.grid.axes) {
       const yAxisX = worldToScreen(0, 0).x;
       const xAxisY = worldToScreen(0, 0).y;
@@ -146,81 +164,123 @@ function drawGrid() {
 
   if (scene.grid.axes) {
     const origin = worldToScreen(0, 0);
-    octx.strokeStyle = 'rgba(103,232,249,0.4)';
+    octx.strokeStyle = 'rgba(255,255,255,0.22)';
     octx.lineWidth = 1.2;
     octx.beginPath(); octx.moveTo(0, origin.y); octx.lineTo(cssW, origin.y); octx.stroke();
-    octx.strokeStyle = 'rgba(240,171,252,0.4)';
     octx.beginPath(); octx.moveTo(origin.x, 0); octx.lineTo(origin.x, cssH); octx.stroke();
-    octx.fillStyle = 'rgba(248,250,252,0.85)';
-    octx.beginPath(); octx.arc(origin.x, origin.y, 2.5, 0, Math.PI * 2); octx.fill();
+    octx.fillStyle = 'rgba(255,255,255,0.7)';
+    octx.beginPath(); octx.arc(origin.x, origin.y, 2.4, 0, Math.PI * 2); octx.fill();
   }
 }
 
 const HANDLE_LEN = 58;   // px
 const HANDLE_R = 6.5;
 
-function selectedTransformable() {
-  if (!model.selectedId) return null;
-  const found = findItem(model.scene.items, model.selectedId);
-  return found && found.item.kind !== 'modifier' ? found.item : null;
+function selectionPivot() {
+  const pivot = model.selectionPivot();
+  return pivot; // null when nothing transformable is selected
+}
+
+/** gizmo orientation: the selected shape's local frame when exactly one is selected, world axes otherwise */
+function gizmoRotation() {
+  if (model.selectedIds.length !== 1) return 0;
+  const item = findItem(model.scene.items, model.selectedIds[0])?.item;
+  if (!item || item.kind === 'group' || item.kind === 'modifier') return 0;
+  return (item.transform.rotation || 0) * Math.PI / 180;
+}
+const gizmoHandlePositions = (pivot) => {
+  const rot = gizmoRotation();
+  return {
+    rot: rot,
+    rotHandle: { x: worldToScreen(pivot.x, pivot.y).x - Math.sin(rot) * HANDLE_LEN, y: worldToScreen(pivot.x, pivot.y).y - Math.cos(rot) * HANDLE_LEN },
+    scaleHandle: { x: worldToScreen(pivot.x, pivot.y).x + Math.cos(rot) * HANDLE_LEN, y: worldToScreen(pivot.x, pivot.y).y - Math.sin(rot) * HANDLE_LEN },
+  };
+};
+
+function primarySelectedItem() {
+  const id = model.selectedIds[model.selectedIds.length - 1];
+  return id ? findItem(model.scene.items, id)?.item ?? null : null;
+}
+
+/** draggable param handles for a single shape (the primary selection) */
+function paramHandlePositions(item) {
+  if (!item || item.kind !== 'shape') return [];
+  const handles = SHAPE_HANDLES[item.shapeId];
+  if (!handles) return [];
+  return handles.map(h => {
+    const local = h.anchor(item.params);
+    const world = itemLocalToWorld(item, local[0], local[1]);
+    return { handle: h, world, screen: worldToScreen(world.x, world.y) };
+  });
 }
 
 function drawOverlay() {
   octx.clearRect(0, 0, cssW, cssH);
   drawGrid();
 
-  const item = selectedTransformable();
-  if (!item) return;
-  const T = item.transform;
-  const c = worldToScreen(T.x, T.y);
-  const rot = (T.rotation || 0) * Math.PI / 180;
-  const rotHandle = { x: c.x - Math.sin(rot) * HANDLE_LEN, y: c.y - Math.cos(rot) * HANDLE_LEN };
-  const scaleHandle = { x: c.x + Math.cos(rot) * HANDLE_LEN, y: c.y + Math.sin(rot) * HANDLE_LEN };
+  const pivot = selectionPivot();
+  if (pivot) {
+    const c = worldToScreen(pivot.x, pivot.y);
+    const { rot, rotHandle, scaleHandle } = gizmoHandlePositions(pivot);
 
-  // connector lines
-  octx.save();
-  octx.setLineDash([5, 4]);
-  octx.lineWidth = 1.4;
-  octx.strokeStyle = 'rgba(248,250,252,0.55)';
-  octx.beginPath(); octx.moveTo(c.x, c.y); octx.lineTo(rotHandle.x, rotHandle.y); octx.stroke();
-  octx.beginPath(); octx.moveTo(c.x, c.y); octx.lineTo(scaleHandle.x, scaleHandle.y); octx.stroke();
-  octx.restore();
+    // connector lines
+    octx.save();
+    octx.setLineDash([5, 4]);
+    octx.lineWidth = 1.3;
+    octx.strokeStyle = 'rgba(255,255,255,0.5)';
+    octx.beginPath(); octx.moveTo(c.x, c.y); octx.lineTo(rotHandle.x, rotHandle.y); octx.stroke();
+    octx.beginPath(); octx.moveTo(c.x, c.y); octx.lineTo(scaleHandle.x, scaleHandle.y); octx.stroke();
+    octx.restore();
 
-  // rotation handle
-  octx.fillStyle = '#0ea5b7';
-  octx.strokeStyle = '#cffafe';
-  octx.lineWidth = 1.6;
-  octx.beginPath(); octx.arc(rotHandle.x, rotHandle.y, HANDLE_R, 0, Math.PI * 2); octx.fill(); octx.stroke();
-  octx.fillStyle = '#ecfeff';
-  octx.beginPath();
-  octx.arc(rotHandle.x, rotHandle.y, 2.1, 0, Math.PI * 2); octx.fill();
+    // rotation handle (ice blue)
+    octx.fillStyle = '#7dd3fc';
+    octx.strokeStyle = '#082f3f';
+    octx.lineWidth = 1.6;
+    octx.beginPath(); octx.arc(rotHandle.x, rotHandle.y, HANDLE_R, 0, Math.PI * 2); octx.fill(); octx.stroke();
+    octx.fillStyle = '#082f3f';
+    octx.beginPath(); octx.arc(rotHandle.x, rotHandle.y, 2, 0, Math.PI * 2); octx.fill();
 
-  // scale handle (square)
-  octx.save();
-  octx.translate(scaleHandle.x, scaleHandle.y);
-  octx.rotate(-rot);
-  octx.fillStyle = '#a21caf';
-  octx.strokeStyle = '#f5d0fe';
-  octx.lineWidth = 1.6;
-  octx.beginPath(); octx.rect(-HANDLE_R, -HANDLE_R, HANDLE_R * 2, HANDLE_R * 2); octx.fill(); octx.stroke();
-  octx.restore();
+    // scale handle (amber square)
+    octx.save();
+    octx.translate(scaleHandle.x, scaleHandle.y);
+    octx.rotate(-rot);
+    octx.fillStyle = '#fbbf24';
+    octx.strokeStyle = '#3a2a05';
+    octx.lineWidth = 1.6;
+    octx.beginPath(); octx.rect(-HANDLE_R, -HANDLE_R, HANDLE_R * 2, HANDLE_R * 2); octx.fill(); octx.stroke();
+    octx.restore();
 
-  // center handle
-  octx.fillStyle = '#111827';
-  octx.strokeStyle = '#e879f9';
-  octx.lineWidth = 2;
-  octx.beginPath(); octx.arc(c.x, c.y, 7, 0, Math.PI * 2); octx.fill(); octx.stroke();
-  octx.strokeStyle = '#f0abfc';
-  octx.lineWidth = 1.4;
-  octx.beginPath();
-  octx.moveTo(c.x - 4, c.y); octx.lineTo(c.x + 4, c.y);
-  octx.moveTo(c.x, c.y - 4); octx.lineTo(c.x, c.y + 4);
-  octx.stroke();
+    // pivot handle
+    octx.fillStyle = '#0e131a';
+    octx.strokeStyle = '#ffffff';
+    octx.lineWidth = 2;
+    octx.beginPath(); octx.arc(c.x, c.y, 7, 0, Math.PI * 2); octx.fill(); octx.stroke();
+    octx.strokeStyle = '#ffffff';
+    octx.lineWidth = 1.4;
+    octx.beginPath();
+    octx.moveTo(c.x - 4, c.y); octx.lineTo(c.x + 4, c.y);
+    octx.moveTo(c.x, c.y - 4); octx.lineTo(c.x, c.y + 4);
+    octx.stroke();
+  }
+
+  // param handles for the primary shape
+  const primary = primarySelectedItem();
+  for (const { handle, screen } of paramHandlePositions(primary)) {
+    octx.fillStyle = '#0e131a';
+    octx.strokeStyle = '#ffffff';
+    octx.lineWidth = 1.6;
+    octx.beginPath(); octx.arc(screen.x, screen.y, 5, 0, Math.PI * 2); octx.fill(); octx.stroke();
+    octx.font = '8.5px "JetBrains Mono", monospace';
+    octx.fillStyle = 'rgba(255,255,255,0.85)';
+    octx.fillText(handle.param, screen.x + 8, screen.y + 3);
+  }
 }
 
-// ═══════════════ picking ═══════════════
+// ═══════════════ picking: nearest SDF by outline distance ═══════════════
+// Every click selects the closest SDF — outline distance dominates,
+// but shapes enclosing the cursor always beat shapes merely near it
+// (signed distance ascending = innermost first).
 
-// raw distance of a shape in its own local frame (identity transform wrapper)
 function evalShapeLocal(shapeId, x, y, params) {
   return evalScene({
     items: [{
@@ -232,36 +292,42 @@ function evalShapeLocal(shapeId, x, y, params) {
   }, x, y);
 }
 
-function pickLeaf(wx, wy) {
-  let best = null, bestD = Infinity;
-  const thresh = Math.max(0.12, 12 / camera.scale);
-  // walk the tree, carrying the container-space point (mirrors GLSL traversal;
-  // coordinate modifiers are intentionally ignored for hit-testing)
-  const walk = (list, px, py) => {
+function pickNearest(wx, wy) {
+  let best = null, bestScore = Infinity;
+  const walk = (list) => {
     for (const item of list) {
       if (!item.visible) continue;
-      if (item.kind === 'group') {
-        const T = item.transform;
-        const dx = px - T.x, dy = py - T.y;
-        const a = -((T.rotation || 0) * Math.PI / 180);
-        const ca = Math.cos(a), sa = Math.sin(a);
-        const s = T.scale || 1;
-        walk(item.children || [], (ca * dx - sa * dy) / s, (sa * dx + ca * dy) / s);
-        continue;
-      }
+      if (item.kind === 'group') { walk(item.children || []); continue; } // groups are pure containers
       if (item.kind !== 'shape') continue;   // custom GLSL is not CPU-pickable
-      const T = item.transform;
-      const dx = px - T.x, dy = py - T.y;
-      const a = -((T.rotation || 0) * Math.PI / 180);
-      const ca = Math.cos(a), sa = Math.sin(a);
-      const s = T.scale || 1;
-      const lx = (ca * dx - sa * dy) / s, ly = (sa * dx + ca * dy) / s;
-      const d = evalShapeLocal(item.shapeId, lx, ly, item.params) * s - (item.height || 0);
-      if (d < bestD) { bestD = d; best = item; }
+      const local = worldToItemLocal(item, wx, wy);
+      const d = evalShapeLocal(item.shapeId, local.x, local.y, item.params) * (item.transform.scale || 1) - (item.height || 0);
+      if (d < bestScore) { bestScore = d; best = item; }
     }
   };
-  walk(model.scene.items, wx, wy);
-  return best && bestD < thresh ? best : null;
+  walk(model.scene.items);
+  return best;
+}
+
+/** collect world-space transform start points for every selected drawable (groups → descendant leaves) */
+function collectSelectedTransformables() {
+  const wanted = new Set(model.selectedIds);
+  const out = [];
+  const walk = (list) => {
+    for (const item of list) {
+      if (item.kind === 'group') {
+        if (wanted.has(item.id)) {
+          const leaves = [];
+          const collect = (l) => l.forEach(i => i.kind === 'group' ? collect(i.children || []) : leaves.push(i));
+          collect(item.children || []);
+          out.push(...leaves);
+        } else if (item.children) walk(item.children);
+        continue;
+      }
+      if (wanted.has(item.id) && item.kind !== 'modifier') out.push(item);
+    }
+  };
+  walk(model.scene.items);
+  return out;
 }
 
 // ═══════════════ pointer interactions ═══════════════
@@ -284,43 +350,63 @@ overlay.addEventListener('pointerdown', (e) => {
   }
   if (e.button !== 0) return;
 
-  // gizmo handles first
-  const sel = selectedTransformable();
-  if (sel) {
-    const T = sel.transform;
-    const c = worldToScreen(T.x, T.y);
-    const rot = (T.rotation || 0) * Math.PI / 180;
-    const rotH = { x: c.x - Math.sin(rot) * HANDLE_LEN, y: c.y - Math.cos(rot) * HANDLE_LEN };
-    const sclH = { x: c.x + Math.cos(rot) * HANDLE_LEN, y: c.y + Math.sin(rot) * HANDLE_LEN };
-    const dRot = Math.hypot(p.x - rotH.x, p.y - rotH.y);
-    const dScl = Math.hypot(p.x - sclH.x, p.y - sclH.y);
-    const dCtr = Math.hypot(p.x - c.x, p.y - c.y);
-    if (dRot < 12 || dScl < 12 || dCtr < 12) {
+  // 1) gizmo handles (move/rotate/scale the whole selection)
+  const pivot = selectionPivot();
+  if (pivot) {
+    const c = worldToScreen(pivot.x, pivot.y);
+    const { rotHandle: rotH, scaleHandle: sclH } = gizmoHandlePositions(pivot);
+    if (Math.hypot(p.x - rotH.x, p.y - rotH.y) < 12) {
       model.checkpoint();
-      dragState = {
-        mode: dRot < 12 ? 'rotate' : dScl < 12 ? 'scale' : 'move',
-        id: sel.id, startX: p.x, startY: p.y, w0: w,
-        r0: T.rotation || 0, s0: T.scale || 1,
-        itemX0: T.x, itemY0: T.y,
-        grabDX: T.x - w.x, grabDY: T.y - w.y,
-      };
+      const startAngle = Math.atan2(w.y - pivot.y, w.x - pivot.x) * 180 / Math.PI;
+      dragState = { mode: 'rotate', pivot, startAngle, lastApplied: 0 };
+      return;
+    }
+    if (Math.hypot(p.x - sclH.x, p.y - sclH.y) < 12) {
+      model.checkpoint();
+      const startDist = Math.max(0.05, Math.hypot(w.x - pivot.x, w.y - pivot.y));
+      dragState = { mode: 'scale', pivot, startDist, lastFactor: 1 };
+      return;
+    }
+    if (Math.hypot(p.x - c.x, p.y - c.y) < 12) {
+      model.checkpoint();
+      dragState = makeMoveDrag(p, w);
       return;
     }
   }
 
-  // pick a shape
-  const leaf = pickLeaf(w.x, w.y);
-  if (leaf) {
+  // 2) param handles on the primary shape (drag edges to reshape)
+  const primary = primarySelectedItem();
+  for (const { handle, world, screen } of paramHandlePositions(primary)) {
+    if (Math.hypot(p.x - screen.x, p.y - screen.y) <= 10) {
+      model.checkpoint();
+      dragState = { mode: 'param', id: primary.id, handle };
+      return;
+    }
+  }
+
+  // 3) nearest SDF pick
+  const nearest = pickNearest(w.x, w.y);
+  if (nearest) {
+    if (e.shiftKey) { model.toggleSelected(nearest.id); refreshSelectionUI({ fromCanvas: true }); return; }
+    const already = model.selectedIds.includes(nearest.id);
+    if (!already) model.selectOnly(nearest.id);
     model.checkpoint();
-    model.selectedId = leaf.id;
-    refreshSelectionUI();
-    dragState = { mode: 'move', id: leaf.id, startX: p.x, startY: p.y, w0: w, itemX0: leaf.transform.x, itemY0: leaf.transform.y, grabDX: leaf.transform.x - w.x, grabDY: leaf.transform.y - w.y };
-    requestRender();
+    dragState = makeMoveDrag(p, w, nearest);
+    dragState.collapseClick = already && model.selectedIds.length > 1;
+    refreshSelectionUI({ fromCanvas: true });
     return;
   }
 
+  // 4) empty scene → pan / maybe deselect
   dragState = { mode: 'pan', startX: p.x, startY: p.y, cx: camera.cx, cy: camera.cy, maybeDeselect: true, moved: 0 };
 });
+
+function makeMoveDrag(p, w, clickedItem) {
+  const starts = collectSelectedTransformables().map(item => ({ id: item.id, x: item.transform.x, y: item.transform.y }));
+  const primaryId = (clickedItem && clickedItem.id) || starts[starts.length - 1]?.id;
+  const primaryStart = starts.find(s => s.id === primaryId) || starts[0] || { x: 0, y: 0 };
+  return { mode: 'move', startX: p.x, startY: p.y, startW: w, starts, primaryId, primaryStart, moved: 0, collapseClick: false };
+}
 
 overlay.addEventListener('pointermove', (e) => {
   const p = _pt(e);
@@ -338,53 +424,75 @@ overlay.addEventListener('pointermove', (e) => {
     return;
   }
 
-  const item = dragState.id ? findItem(model.scene.items, dragState.id)?.item : null;
-  if (!item) { dragState = null; return; }
   const snap = model.scene.grid.snap ? 0.25 : 0;
 
   if (dragState.mode === 'move') {
-    let nx = w.x + dragState.grabDX, ny = w.y + dragState.grabDY;
-    if (e.shiftKey && dragState.itemX0 !== undefined) {   // axis lock
-      if (Math.abs(nx - dragState.itemX0) >= Math.abs(ny - dragState.itemY0)) ny = dragState.itemY0;
-      else nx = dragState.itemX0;
-    }
-    if (snap) { nx = Math.round(nx / snap) * snap; ny = Math.round(ny / snap) * snap; }
-    model.setTransform(item.id, { x: round4(nx), y: round4(ny) }, { checkpoint: false });
-  } else if (dragState.mode === 'rotate') {
-    const T0 = findItem(model.scene.items, item.id).item.transform;
-    const ang = Math.atan2(w.y - T0.y, w.x - T0.x) * 180 / Math.PI;
-    // the rotation handle sits on the local +y axis; its bearing is 90° + rotation
-    let deg = ang - 90;
-    if (e.shiftKey) deg = Math.round(deg / 15) * 15;
-    deg = ((deg % 360) + 360) % 360;
-    if (deg > 180) deg -= 360;
-    model.setTransform(item.id, { rotation: round4(deg) }, { checkpoint: false });
-  } else if (dragState.mode === 'scale') {
-    const T0 = findItem(model.scene.items, item.id).item.transform;
-    const dist = Math.hypot(w.x - T0.x, w.y - T0.y);
-    const baseDistWorld = HANDLE_LEN / camera.scale;
-    let s = (dragState.s0 || 1) * (dist / baseDistWorld);
-    if (e.shiftKey) s = Math.round(s * 10) / 10;
-    s = clamp(s, 0.05, 20);
-    if (snap) s = Math.round(s / snap) * snap;
-    model.setTransform(item.id, { scale: round4(s) }, { checkpoint: false });
+    const dwx = w.x - dragState.startW.x, dwy = w.y - dragState.startW.y;
+    dragState.moved = Math.max(dragState.moved || 0, Math.hypot(p.x - dragState.startX, p.y - dragState.startY));
+    // snap the primary, distribute the same delta to everything
+    let px = dragState.primaryStart.x + dwx, py = dragState.primaryStart.y + dwy;
+    if (e.shiftKey) { if (Math.abs(dwx) >= Math.abs(dwy)) py = dragState.primaryStart.y; else px = dragState.primaryStart.x; }
+    if (snap) { px = Math.round(px / snap) * snap; py = Math.round(py / snap) * snap; }
+    const dx = px - dragState.primaryStart.x, dy = py - dragState.primaryStart.y;
+    for (const s of dragState.starts) model.setTransform(s.id, { x: round4(s.x + dx), y: round4(s.y + dy) }, { checkpoint: false });
+    syncInspectorValues();
+    requestRender();
+    return;
   }
-  syncInspectorValues();
-  requestRender();
-});
 
-const round4 = (v) => Math.round(v * 10000) / 10000;
+  if (dragState.mode === 'rotate') {
+    const ang = Math.atan2(w.y - dragState.pivot.y, w.x - dragState.pivot.x) * 180 / Math.PI;
+    let total = ang - dragState.startAngle;
+    if (e.shiftKey) total = Math.round(total / 15) * 15;
+    const incremental = total - dragState.lastApplied;
+    if (incremental !== 0) { model.rotateSelectedBy(incremental, dragState.pivot); dragState.lastApplied = total; }
+    syncInspectorValues();
+    requestRender();
+    return;
+  }
+
+  if (dragState.mode === 'scale') {
+    const dist = Math.max(0.05, Math.hypot(w.x - dragState.pivot.x, w.y - dragState.pivot.y));
+    let factor = dist / dragState.startDist;
+    if (e.shiftKey) factor = Math.round(factor * 10) / 10;
+    const incremental = factor / dragState.lastFactor;
+    if (incremental !== 1) { model.scaleSelectedBy(incremental, dragState.pivot); dragState.lastFactor = factor; }
+    syncInspectorValues();
+    requestRender();
+    return;
+  }
+
+  if (dragState.mode === 'param') {
+    const item = findItem(model.scene.items, dragState.id)?.item;
+    if (!item) { dragState = null; return; }
+    const local = worldToItemLocal(item, w.x, w.y);
+    const def = getShape(item.shapeId);
+    const pdef = def?.params.find(pp => pp.key === dragState.handle.param);
+    let v = dragState.handle.compute([local.x, local.y], item.params);
+    if (!Number.isFinite(v)) v = 0;
+    if (pdef?.step >= 1) v = Math.round(v); else v = round4(v);
+    if (pdef) v = clamp(v, pdef.min, pdef.max);
+    model.setParam(item.id, dragState.handle.param, v);
+    syncInspectorValues();
+    requestRender();
+    return;
+  }
+});
 
 function endDrag(e) {
   if (!dragState) return;
   if (dragState.mode === 'pan' && dragState.maybeDeselect && (dragState.moved || 0) < 6) {
-    model.selectedId = null;
+    if (model.selectedIds.length) { model.clearSelection(); refreshSelectionUI(); }
+  }
+  // plain click (no drag) on an already-selected item collapses the selection to it
+  if (dragState.mode === 'move' && dragState.collapseClick && (dragState.moved || 0) < 4) {
+    model.selectOnly(dragState.primaryId);
     refreshSelectionUI();
-    requestRender();
   }
   dragState = null;
   viewport.style.cursor = '';
   model.touch({ structural: false }); // persist
+  requestRender();
 }
 overlay.addEventListener('pointerup', endDrag);
 overlay.addEventListener('pointercancel', endDrag);
@@ -404,17 +512,20 @@ overlay.addEventListener('wheel', (e) => {
 }, { passive: false });
 
 function updateHoverCursor(p) {
-  const sel = selectedTransformable();
-  if (sel) {
-    const T = sel.transform;
-    const c = worldToScreen(T.x, T.y);
-    const rot = (T.rotation || 0) * Math.PI / 180;
-    const rotH = { x: c.x - Math.sin(rot) * HANDLE_LEN, y: c.y - Math.cos(rot) * HANDLE_LEN };
-    const sclH = { x: c.x + Math.cos(rot) * HANDLE_LEN, y: c.y + Math.sin(rot) * HANDLE_LEN };
+  const pivot = selectionPivot();
+  if (pivot) {
+    const c = worldToScreen(pivot.x, pivot.y);
+    const { rotHandle: rotH, scaleHandle: sclH } = gizmoHandlePositions(pivot);
     if (Math.hypot(p.x - rotH.x, p.y - rotH.y) < 12) { viewport.style.cursor = 'grab'; return; }
     if (Math.hypot(p.x - sclH.x, p.y - sclH.y) < 12) { viewport.style.cursor = 'nwse-resize'; return; }
     if (Math.hypot(p.x - c.x, p.y - c.y) < 12) { viewport.style.cursor = 'move'; return; }
   }
+  const primary = primarySelectedItem();
+  for (const { screen } of paramHandlePositions(primary)) {
+    if (Math.hypot(p.x - screen.x, p.y - screen.y) <= 10) { viewport.style.cursor = 'grab'; return; }
+  }
+  const w = screenToWorld(p.x, p.y);
+  if (!spaceDown && pickNearest(w.x, w.y)) { viewport.style.cursor = 'move'; return; }
   viewport.style.cursor = spaceDown ? 'grab' : 'default';
 }
 
@@ -424,17 +535,31 @@ function updateReadout(w) {
   const el = $('#dReadout');
   if (Number.isFinite(d)) {
     el.textContent = (d >= 0 ? '+' : '') + d.toFixed(3);
-    el.style.color = d < 0 ? '#67e8f9' : '#9aa2c7';
+    el.style.color = d < 0 ? '#7dd3fc' : 'rgba(255,255,255,0.55)';
   } else {
     el.textContent = '—';
-    el.style.color = '#9aa2c7';
+    el.style.color = 'rgba(255,255,255,0.55)';
   }
 }
 
 // keyboard pan state
 window.addEventListener('keydown', (e) => { if (e.code === 'Space' && !isEditableTarget(e.target)) { spaceDown = true; e.preventDefault(); } });
 window.addEventListener('keyup', (e) => { if (e.code === 'Space') spaceDown = false; });
-const isEditableTarget = (t) => t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable);
+
+// ═══════════════ right panel tabs (Layers / Inspector / Export) ═══════════════
+
+function activateRTab(name) {
+  $$('.rtab').forEach(t => {
+    const on = t.dataset.rtab === name;
+    t.classList.toggle('active', on);
+    t.setAttribute('aria-selected', String(on));
+  });
+  $('#rtab-layers').hidden = name !== 'layers';
+  $('#rtab-inspector').hidden = name !== 'inspector';
+  $('#rtab-export').hidden = name !== 'export';
+  if (name === 'export') refreshExportCode(true);
+}
+$$('.rtab').forEach(tab => tab.addEventListener('click', () => activateRTab(tab.dataset.rtab)));
 
 // ═══════════════ layers panel ═══════════════
 
@@ -444,7 +569,7 @@ const GRIP = '<svg viewBox="0 0 10 16"><circle cx="2.5" cy="3" r="1.3" fill="cur
 const CARET = '<svg viewBox="0 0 24 24"><path fill="currentColor" d="M12 15.5 4.5 8l1.6-1.6L12 12.3l5.9-5.9L19.5 8z"/></svg>';
 
 const KIND_ICON = {
-  shape: (item) => `<svg viewBox="0 0 24 24"><path fill="currentColor" d="M12 2l2.4 5.2 5.6.5-4.3 3.7 1.3 5.5L12 14.7 7 17l1.3-5.6-4.3-3.6 5.6-.6L12 2z"/></svg>`,
+  shape: () => `<svg viewBox="0 0 24 24"><path fill="currentColor" d="M12 2l2.4 5.2 5.6.5-4.3 3.7 1.3 5.5L12 14.7 7 17l1.3-5.6-4.3-3.6 5.6-.6L12 2z"/></svg>`,
   group: () => '<svg viewBox="0 0 24 24"><path fill="currentColor" d="M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z"/></svg>',
   modifier: () => '<svg viewBox="0 0 24 24"><path fill="currentColor" d="M9 4 7 9H3v2h3l-1 6h2l1-6h4l-1 6h2l1-6h3V9h-3l1-5z"/></svg>',
   custom: () => '<svg viewBox="0 0 24 24"><path fill="currentColor" d="M8 4a3 3 0 0 0-3 3v3a2 2 0 0 1-2 2 2 2 0 0 1 2 2v3a3 3 0 0 0 3 3h1v-2H8.5a1 1 0 0 1-1-1v-3a4 4 0 0 0-1.5-3A4 4 0 0 0 7.5 9V7a1 1 0 0 1 1-1H9V4H8zm8 0h-1v2h1.5a1 1 0 0 1 1 1v2a4 4 0 0 0 1.5 3 4 4 0 0 0-1.5 3v3a1 1 0 0 1-1 1H15v2h1a3 3 0 0 0 3-3v-3a2 2 0 0 1 2-2 2 2 0 0 1-2-2V7a3 3 0 0 0-3-3h-1z"/></svg>',
@@ -456,25 +581,35 @@ const BLEND_SHORT = {
 };
 const blendBadgeClass = (b) => b?.startsWith('smooth') ? 'smooth' : (b?.includes('subtract') ? 'subtract' : (b?.includes('intersect') ? 'intersect' : ''));
 
+function countLayers(items) {
+  let n = 0;
+  for (const i of items) { n += 1; if (i.children) n += countLayers(i.children); }
+  return n;
+}
+
 function renderLayers() {
   const list = $('#layerList');
   const scene = model.scene;
   list.innerHTML = '';
   const frag = document.createDocumentFragment();
+  const selected = new Set(model.selectedIds);
 
   const walk = (items, depth) => {
-    // top of the list = rendered last = "on top" — iterate reverse
+    // top of list = on top = rendered last; iterate reverse
     for (let i = items.length - 1; i >= 0; i--) {
       const item = items[i];
       const li = document.createElement('li');
-      li.className = 'layer-row' + (item.id === model.selectedId ? ' selected' : '') + (item.visible ? '' : ' is-hidden-layer');
+      li.className = 'layer-row'
+        + (selected.has(item.id) ? ' selected' : '')
+        + (item.visible ? '' : ' is-hidden-layer')
+        + (item.kind === 'group' ? ' layer-group-row' : '');
       li.draggable = true;
       li.dataset.id = item.id;
-      li.style.paddingLeft = `${6 + depth * 16}px`;
+      li.style.paddingLeft = `${6 + depth * 15}px`;
 
       const caret = item.kind === 'group'
         ? `<button class="group-caret ${item.collapsed ? 'collapsed' : ''}" data-toggle-collapse title="${item.collapsed ? 'Expand' : 'Collapse'} group">${CARET}</button>`
-        : `<span class="indent-guide" style="width:18px;border:0"></span>`;
+        : `<span class="indent-guide"></span>`;
 
       const badge = item.kind === 'modifier'
         ? '<span class="blend-badge" title="Field / symmetry modifier">fx</span>'
@@ -484,7 +619,7 @@ function renderLayers() {
         <span class="drag-grip" title="Drag to reorder · drop on a group to nest">${GRIP}</span>
         ${caret}
         <button class="visibility-btn ${item.visible ? '' : 'off'}" data-toggle-vis title="${item.visible ? 'Hide' : 'Show'} layer">${item.visible ? EYE_ON : EYE_OFF}</button>
-        <span class="layer-kind-icon ${item.kind}">${KIND_ICON[item.kind]?.(item) ?? KIND_ICON.shape(item)}</span>
+        <span class="layer-kind-icon ${item.kind}">${(KIND_ICON[item.kind] || KIND_ICON.shape)()}</span>
         <input class="layer-name" value="${escapeAttr(item.name)}" spellcheck="false" aria-label="Layer name" />
         ${badge}`;
       frag.appendChild(li);
@@ -496,13 +631,13 @@ function renderLayers() {
   list.appendChild(frag);
 
   $('#layersEmpty').hidden = scene.items.length > 0;
-  $('#selectedReadout').textContent = model.selectedId
-    ? (findItem(scene.items, model.selectedId)?.item.name ?? 'none')
-    : 'none';
+  $('#layersBadge').textContent = String(countLayers(scene.items));
+  $('#selectedReadout').textContent = model.selectedIds.length === 0
+    ? 'none'
+    : model.selectedIds.length === 1
+      ? (findItem(scene.items, model.selectedIds[0])?.item.name ?? 'none')
+      : `${model.selectedIds.length} layers`;
 }
-
-const escapeAttr = (s) => String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
-const escapeHtml = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
 // layer list events (delegated)
 $('#layerList').addEventListener('click', (e) => {
@@ -512,7 +647,7 @@ $('#layerList').addEventListener('click', (e) => {
   if (e.target.closest('[data-toggle-vis]')) { model.toggleVisible(id); return; }
   if (e.target.closest('[data-toggle-collapse]')) { model.toggleCollapsed(id); return; }
   if (e.target.closest('.layer-name')) return; // renaming
-  model.selectedId = id;
+  if (e.shiftKey) model.toggleSelected(id); else model.selectOnly(id);
   refreshSelectionUI();
   requestRender();
 });
@@ -572,32 +707,113 @@ function clearDropHints() {
   $$('#layerList .layer-row').forEach(r => r.classList.remove('drag-over-top', 'drag-over-bottom', 'drag-over-inside'));
 }
 
-function refreshSelectionUI() {
+function refreshSelectionUI({ fromCanvas = false } = {}) {
   renderLayers();
   renderInspector();
+  if (fromCanvas && model.selectedIds.length) activateRTab('inspector');
   requestRender();
 }
 
-// ═══════════════ inspector (selected layer) ═══════════════
+// ═══════════════ inspector ═══════════════
 
-function selectedItem() {
-  return model.selectedId ? findItem(model.scene.items, model.selectedId)?.item ?? null : null;
+function selectedCount() { return model.selectedIds.length; }
+function singleSelectedItem() {
+  return model.selectedIds.length === 1 ? findItem(model.scene.items, model.selectedIds[0])?.item ?? null : null;
+}
+
+const numberOrNull = (v) => {
+  const n = parseFloat(v);
+  return Number.isFinite(n) ? n : null;
+};
+
+function blendOptionsHTML(current) {
+  return BLEND_MODES.map(b => `<option value="${b.id}" ${b.id === current ? 'selected' : ''}>${b.label}</option>`).join('');
 }
 
 function renderInspector() {
   const el = $('#inspector');
-  const item = selectedItem();
-  if (!item) {
+  const count = selectedCount();
+
+  // ── nothing selected ──
+  if (count === 0) {
     el.innerHTML = `
       <div class="inspector-empty">
-        <span class="inspector-empty-icon">✦</span>
-        <strong style="color:var(--text-dim)">Nothing selected</strong><br/>
-        Click any shape in the canvas or the layer stack to edit it.<br/><br/>
-        <button class="btn-ghost" id="quickAddCircle" style="margin:0 auto">Quick add · Circle</button>
+        <svg class="inspector-empty-mark" viewBox="0 0 100 100" aria-hidden="true">
+          <path fill="none" stroke="currentColor" stroke-width="7" stroke-linecap="round" d="M27 68c16 0 16-17 31-17s13-19 13-19"/>
+          <circle cx="27" cy="68" r="5.5" fill="currentColor"/>
+        </svg>
+        <p class="inspector-empty-title">Nothing selected</p>
+        <p class="inspector-empty-sub">Click any shape on the canvas — the closest SDF is selected. Shift-click adds layers to a selection. Esc clears it back to the whole-scene outline.</p>
+        <button class="btn-ghost" id="quickAddCircle">Quick add · Circle</button>
       </div>`;
     $('#quickAddCircle')?.addEventListener('click', () => model.addShape('circle'));
     return;
   }
+
+  // ── multiple selected → shared editing ──
+  if (count > 1) {
+    const items = model.selectedItems();
+    const commonBlend = items.every(i => i.blend === items[0].blend) ? items[0].blend : null;
+    const avgK = items.reduce((a, i) => a + (i.k ?? 0.28), 0) / items.length;
+    const avgH = items.reduce((a, i) => a + (i.height || 0), 0) / items.length;
+    el.innerHTML = `
+      <div class="multi-banner">
+        <strong>${count} layers selected</strong>
+        <span>Shared edits apply to all of them. Shift-click to add / remove.</span>
+      </div>
+      <div class="field-group">
+        <div class="field-group-title">Blend with layers below</div>
+        <select class="select-field" id="multiBlend" aria-label="Blend mode for selection">
+          ${commonBlend ? '' : '<option value="" selected disabled>Mixed…</option>'}
+          ${blendOptionsHTML(commonBlend)}
+        </select>
+        <div class="param-row" style="margin-top:10px">
+          <label for="multiK">Blend radius <em>k</em></label>
+          <input type="range" id="multiKRange" min="0.02" max="1.5" step="0.01" value="${avgK.toFixed(2)}" aria-label="Blend radius" />
+          <input type="number" class="num-inline" id="multiK" step="0.05" value="${avgK.toFixed(2)}" aria-label="Blend radius value" />
+        </div>
+      </div>
+      <div class="field-group">
+        <div class="field-group-title">Height · surface offset</div>
+        <div class="param-row">
+          <label for="multiHeight">Offset</label>
+          <input type="range" id="multiHeightRange" min="-2" max="2" step="0.01" value="${clamp(avgH, -2, 2).toFixed(2)}" aria-label="Height offset" />
+          <input type="number" class="num-inline" id="multiHeight" step="0.05" value="${avgH.toFixed(2)}" aria-label="Height offset value" />
+        </div>
+      </div>
+      <div class="field-group">
+        <div class="field-group-title">Arrange</div>
+        <div class="inspector-actions" style="margin-top:2px">
+          <button class="btn-ghost" id="multiGroup" title="Wrap selection in a group (Ctrl+G)">
+            <svg viewBox="0 0 24 24"><path fill="currentColor" d="M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z"/></svg>Group
+          </button>
+          <button class="btn-ghost" id="multiDuplicate" title="Duplicate selection (Ctrl+D)">
+            <svg viewBox="0 0 24 24"><path fill="currentColor" d="M8 8h12v12H8zM4 4h12v2H6v10H4z"/></svg>Duplicate
+          </button>
+          <button class="btn-ghost" id="multiDelete" title="Delete selection (Del)" style="color:var(--danger);border-color:rgba(179,38,30,.3)">
+            <svg viewBox="0 0 24 24"><path fill="currentColor" d="M9 3h6a1 1 0 0 1 1 1v1h4v2h-1l-1.2 12.1A3 3 0 0 1 14.8 22h-5.6a3 3 0 0 1-3-2.9L5 7H4V5h4V4a1 1 0 0 1 1-1z"/></svg>Delete
+          </button>
+        </div>
+        <p class="field-hint">Nudge with the arrow keys · rotate with [ and ] · drag the pivot handle on canvas to move all of them.</p>
+      </div>`;
+    $('#multiBlend')?.addEventListener('change', (e) => { model.setBlendForSelection(e.target.value); renderInspector(); });
+    const kRange = $('#multiKRange'), kNum = $('#multiK');
+    const setK = (v) => { const n = numberOrNull(v); if (n == null) return; model.setKForSelection(n); if (kRange && document.activeElement !== kRange) kRange.value = clamp(n, 0.02, 1.5); if (kNum && document.activeElement !== kNum) kNum.value = n; };
+    kRange?.addEventListener('input', e => setK(e.target.value));
+    kNum?.addEventListener('input', e => setK(e.target.value));
+    const hRange = $('#multiHeightRange'), hNum = $('#multiHeight');
+    const setH = (v) => { const n = numberOrNull(v); if (n == null) return; model.setHeightForSelection(n); if (hRange && document.activeElement !== hRange) hRange.value = clamp(n, -2, 2); if (hNum && document.activeElement !== hNum) hNum.value = n; };
+    hRange?.addEventListener('input', e => setH(e.target.value));
+    hNum?.addEventListener('input', e => setH(e.target.value));
+    $('#multiGroup')?.addEventListener('click', () => model.groupSelected());
+    $('#multiDuplicate')?.addEventListener('click', () => model.duplicateSelected());
+    $('#multiDelete')?.addEventListener('click', () => model.deleteSelected());
+    return;
+  }
+
+  // ── single selection ──
+  const item = singleSelectedItem();
+  if (!item) { model.clearSelection(); renderInspector(); return; }
 
   const def = item.shapeId ? getShape(item.shapeId) : null;
   const isModifier = item.kind === 'modifier';
@@ -605,92 +821,92 @@ function renderInspector() {
   const isCustom = item.kind === 'custom';
   const isSmooth = item.blend?.startsWith('smooth');
 
-  let html = '';
+  let html = `
+    <div class="insp-header">
+      <span class="insp-kind-dot kind-${item.kind}"></span>
+      <div class="insp-title">
+        <strong>${escapeHtml(item.name)}</strong>
+        <em>${isGroup ? 'group · pure container' : isModifier ? 'field modifier' : isCustom ? 'custom GLSL layer' : (def?.name ?? 'shape')}</em>
+      </div>
+      <button class="icon-btn small" id="inspDeselect" title="Deselect (Esc)" aria-label="Deselect">
+        <svg viewBox="0 0 24 24"><path fill="currentColor" d="M6.4 5 5 6.4 10.6 12 5 17.6 6.4 19 12 13.4 17.6 19l1.4-1.4L13.4 12 19 6.4 17.6 5 12 10.6z"/></svg>
+      </button>
+    </div>`;
 
-  // ── blend (not for field/coord modifiers) ──
+  // blend
   if (!isModifier) {
-    const opts = BLEND_MODES.map(b => `<option value="${b.id}" ${b.id === item.blend ? 'selected' : ''}>${b.label}</option>`).join('');
     html += `
       <div class="field-group">
         <div class="field-group-title">Blend with layers below</div>
-        <select class="select-field" id="blendSelect" aria-label="Blend mode">${opts}</select>
+        <select class="select-field" id="blendSelect" aria-label="Blend mode">${blendOptionsHTML(item.blend)}</select>
         ${isSmooth ? `
-        <div class="blend-k-wrap param-row" style="margin-top:10px">
-          <label for="kRange">Blend radius <em style="color:var(--text-faint)">k</em></label>
-          <span class="param-value" id="kVal">${item.k.toFixed(2)}</span>
+        <div class="param-row" style="margin-top:10px">
+          <label for="kRange">Blend radius <em>k</em></label>
           <input type="range" id="kRange" min="0.02" max="1.5" step="0.01" value="${item.k}" />
+          <input type="number" class="num-inline" id="kNum" step="0.05" min="0" value="${item.k}" aria-label="Blend radius value" />
         </div>` : ''}
       </div>`;
   }
 
-  // ── height / grow ──
-  if (!isModifier) {
+  // height
+  if (!isModifier && !isGroup) {
     html += `
       <div class="field-group">
-        <div class="height-label-row"><label for="heightRange">Height · surface offset</label><em>positive grows the shape</em></div>
-        <div class="height-field">
-          <div class="height-zero"></div>
-          <input type="range" id="heightRange" min="-2" max="2" step="0.01" value="${item.height || 0}" aria-label="Height offset" />
+        <div class="height-label-row"><label for="heightRange">Height · surface offset</label><button class="snippet-btn" id="heightReset" title="Reset height to 0">reset</button></div>
+        <div class="param-row">
+          <label for="heightRange">Offset</label>
+          <input type="range" id="heightRange" min="-2" max="2" step="0.01" value="${clamp(item.height || 0, -2, 2)}" />
+          <input type="number" class="num-inline" id="heightNum" step="0.05" value="${round4(item.height || 0)}" aria-label="Height offset value" />
         </div>
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-top:5px">
-          <span class="param-value" style="font-size:11px;padding:2px 9px" id="heightVal">${(item.height || 0) >= 0 ? '+' : ''}${(item.height || 0).toFixed(2)}</span>
-          <button class="snippet-btn" id="heightReset" title="Reset height to 0">reset</button>
-        </div>
+        <p class="field-hint">Positive grows the shape, negative shrinks it. Type any number — e.g. 4.</p>
       </div>`;
   }
 
-  // ── transform ──
-  if (!isModifier) {
+  // transform
+  if (!isModifier && !isGroup) {
     const T = item.transform;
     html += `
       <div class="field-group">
         <div class="height-label-row"><label>Transform</label><button class="snippet-btn" id="transformReset" title="Reset to origin, no rotation, scale 1">reset</button></div>
-        <div class="num-grid cols-3">
-          <div class="num-field"><label for="tfX">X</label><input type="number" id="tfX" step="0.05" value="${T.x}" /></div>
-          <div class="num-field"><label for="tfY">Y</label><input type="number" id="tfY" step="0.05" value="${T.y}" /></div>
-          <div class="num-field"><label for="tfRot">Rotate°</label><input type="number" id="tfRot" step="1" value="${T.rotation || 0}" /></div>
-          <div class="num-field"><label for="tfScale">Scale</label><input type="number" id="tfScale" step="0.05" min="0.01" value="${T.scale || 1}" /></div>
+        <div class="num-grid cols-4">
+          <div class="num-field"><label for="tfX">X</label><input type="number" id="tfX" step="0.05" value="${round4(T.x)}" /></div>
+          <div class="num-field"><label for="tfY">Y</label><input type="number" id="tfY" step="0.05" value="${round4(T.y)}" /></div>
+          <div class="num-field"><label for="tfRot">Rotate°</label><input type="number" id="tfRot" step="1" value="${round4(T.rotation || 0)}" /></div>
+          <div class="num-field"><label for="tfScale">Scale</label><input type="number" id="tfScale" step="0.05" value="${round4(T.scale || 1)}" /></div>
         </div>
       </div>`;
   }
 
-  // ── shape parameters ──
+  // shape / modifier parameters — slider + typeable number
   if (def && def.params.length) {
-    const rows = def.params.map(p => `
+    const rows = def.params.map(p => {
+      const v = item.params[p.key];
+      return `
       <div class="param-row">
-        <label for="param_${p.key}">${escapeHtml(p.label)}${p.unit ? ` <em style="opacity:.6">(${p.unit})</em>` : ''}</label>
-        <span class="param-value" id="paramVal_${p.key}">${fmtParam(item.params[p.key], p.step)}</span>
-        <input type="range" id="param_${p.key}" data-param="${p.key}" data-step="${p.step}" min="${p.min}" max="${p.max}" step="${p.step}" value="${item.params[p.key]}" />
-      </div>`).join('');
-    html += `<div class="field-group"><div class="field-group-title">${escapeHtml(def.name)} params</div>${rows}</div>`;
+        <label for="param_${p.key}">${escapeHtml(p.label)}${p.unit ? ` <em style="opacity:.55">${p.unit}</em>` : ''}</label>
+        <input type="range" id="param_${p.key}" data-param="${p.key}" data-step="${p.step}" min="${p.min}" max="${p.max}" step="${p.step}" value="${clamp(v, p.min, p.max)}" />
+        <input type="number" class="num-inline" id="paramNum_${p.key}" data-paramnum="${p.key}" data-step="${p.step}" step="${p.step >= 1 ? 1 : 0.05}" value="${fmtParam(v, p.step)}" aria-label="${escapeAttr(p.label)} value" />
+      </div>`;
+    }).join('');
+    html += `<div class="field-group"><div class="field-group-title">${escapeHtml(def.name)} parameters</div>${rows}
+      ${isModifier ? '<p class="field-hint">Modifiers act on everything <strong>below</strong> them in the stack.</p>' : ''}
+    </div>`;
   }
 
-  // ── modifier params ──
-  if (isModifier && def?.params?.length) {
-    const rows = def.params.map(p => `
-      <div class="param-row">
-        <label for="param_${p.key}">${escapeHtml(p.label)}</label>
-        <span class="param-value" id="paramVal_${p.key}">${fmtParam(item.params[p.key], p.step)}</span>
-        <input type="range" id="param_${p.key}" data-param="${p.key}" data-step="${p.step}" min="${p.min}" max="${p.max}" step="${p.step}" value="${item.params[p.key]}" />
-      </div>`).join('');
-    html += `<div class="field-group"><div class="field-group-title">Modifier</div>${rows}
-      <p style="font-size:9.5px;color:var(--text-faint);margin:6px 2px 0;line-height:1.5">Modifiers act on everything <strong>below</strong> them in the stack.</p></div>`;
-  }
-
-  // ── group info ──
+  // group
   if (isGroup) {
     html += `
       <div class="field-group">
-        <div class="field-group-title">Group</div>
-        <p style="font-size:10.5px;color:var(--text-dim);margin:0 2px 8px;line-height:1.55">${(item.children || []).length} layer(s) inside. The group blends with layers below as one shape.</p>
-        <button class="btn-ghost" id="btnUngroup" style="width:100%;justify-content:center">
-          <svg viewBox="0 0 24 24"><path fill="currentColor" d="M3 3h8v8H3zM11 11h8v8h-8z" transform="translate(1.5 1.5) scale(.88)"/></svg>
+        <div class="field-group-title">Group · pure container</div>
+        <p class="field-hint" style="margin-top:0">${(item.children || []).length} layer(s) inside. Children keep their world positions — move the group and they all move with it. The group blends with layers below as one shape.</p>
+        <button class="btn-ghost" id="btnUngroup" style="width:100%;justify-content:center;margin-top:6px">
+          <svg viewBox="0 0 24 24"><path fill="currentColor" d="M3 3h8v8H3zM13 13h8v8h-8z" transform="translate(0 0) scale(0.95)"/></svg>
           Ungroup (keep world placement)
         </button>
       </div>`;
   }
 
-  // ── custom code ──
+  // custom code
   if (isCustom) {
     html += `
       <div class="field-group">
@@ -703,17 +919,16 @@ function renderInspector() {
           <button class="snippet-btn" data-snippet="rotate">+ rot2</button>
           <button class="snippet-btn" data-snippet="poly">+ polygon</button>
         </div>
-        <p style="font-size:9px;color:var(--text-faint);margin:7px 2px 0;line-height:1.55">Available: <code style="color:#a5f3fc">p</code> (local point), every helper used by the built-in shapes, <code style="color:#a5f3fc">smin/smax/rot2</code>. Return a float distance.</p>
+        <p class="field-hint">Available: <code>p</code> (local point), every built-in helper, <code>smin / smax / rot2</code>. Return a float distance.</p>
       </div>`;
   }
 
-  // ── actions ──
   html += `
     <div class="inspector-actions">
       <button class="btn-ghost" id="btnDuplicateInspector" title="Duplicate (Ctrl+D)">
         <svg viewBox="0 0 24 24"><path fill="currentColor" d="M8 8h12v12H8zM4 4h12v2H6v10H4z"/></svg>Duplicate
       </button>
-      <button class="btn-ghost" id="btnDeleteInspector" title="Delete (Del)" style="color:#fda4af;border-color:rgba(251,113,133,.35)">
+      <button class="btn-ghost danger-ghost" id="btnDeleteInspector" title="Delete (Del)">
         <svg viewBox="0 0 24 24"><path fill="currentColor" d="M9 3h6a1 1 0 0 1 1 1v1h4v2h-1l-1.2 12.1A3 3 0 0 1 14.8 22h-5.6a3 3 0 0 1-3-2.9L5 7H4V5h4V4a1 1 0 0 1 1-1z"/></svg>Delete
       </button>
     </div>`;
@@ -724,44 +939,92 @@ function renderInspector() {
 
 const fmtParam = (v, step) => {
   const n = Number(v) || 0;
-  return step >= 1 ? String(Math.round(n)) : n.toFixed(2);
+  return step >= 1 ? String(Math.round(n)) : String(round4(n));
 };
 
 function syncInspectorValues() {
-  const item = selectedItem();
+  const item = singleSelectedItem();
   if (!item) return;
-  const T = item.transform;
   const set = (id, v) => { const el = document.getElementById(id); if (el && document.activeElement !== el) el.value = v; };
+  const T = item.transform || { x: 0, y: 0, rotation: 0, scale: 1 };
   set('tfX', round4(T.x)); set('tfY', round4(T.y)); set('tfRot', round4(T.rotation || 0)); set('tfScale', round4(T.scale || 1));
-  set('heightRange', item.height || 0);
-  const hv = $('#heightVal'); if (hv) hv.textContent = `${(item.height || 0) >= 0 ? '+' : ''}${(item.height || 0).toFixed(2)}`;
+  set('heightRange', clamp(item.height || 0, -2, 2)); set('heightNum', round4(item.height || 0));
+  set('kRange', item.k); set('kNum', item.k);
+  const def = item.shapeId ? getShape(item.shapeId) : null;
+  if (def) for (const p of def.params) {
+    const v = item.params[p.key];
+    set('param_' + p.key, clamp(v, p.min, p.max));
+    set('paramNum_' + p.key, fmtParam(v, p.step));
+  }
 }
 
 function wireInspector(item) {
   const el = $('#inspector');
-  // note: checkpoint-once-per-gesture is wired once at boot (focusin/pointerdown delegation)
-
   const on = (id, ev, fn) => document.getElementById(id)?.addEventListener(ev, fn);
 
+  on('inspDeselect', 'click', () => { model.clearSelection(); refreshSelectionUI(); });
   on('blendSelect', 'change', (e) => { model.setBlend(item.id, e.target.value); renderInspector(); });
-  on('kRange', 'input', (e) => { model.setK(item.id, e.target.value); $('#kVal').textContent = Number(e.target.value).toFixed(2); });
 
-  on('heightRange', 'input', (e) => { model.setHeight(item.id, e.target.value); syncInspectorValues(); });
-  on('heightReset', 'click', () => { model.checkpoint(); model.setHeight(item.id, 0); syncInspectorValues(); });
+  // blend radius — slider + free-typed number
+  const kRange = $('#kRange'), kNum = $('#kNum');
+  const setK = (v) => {
+    const n = numberOrNull(v); if (n == null) return;
+    model.setK(item.id, n);
+    if (kRange && document.activeElement !== kRange) kRange.value = clamp(n, 0.02, 1.5);
+    if (kNum && document.activeElement !== kNum) kNum.value = n;
+    requestRender();
+  };
+  kRange?.addEventListener('input', e => setK(e.target.value));
+  kNum?.addEventListener('input', e => setK(e.target.value));
 
-  const tf = (id, key) => on(id, 'input', (e) => {
-    const v = parseFloat(e.target.value);
-    if (Number.isFinite(v)) model.setTransform(item.id, { [key]: v }, { checkpoint: false });
+  // height — slider + free-typed number (unclamped beyond slider range)
+  const hRange = $('#heightRange'), hNum = $('#heightNum');
+  const setH = (v) => {
+    const n = numberOrNull(v); if (n == null) return;
+    model.setHeight(item.id, n);
+    if (hRange && document.activeElement !== hRange) hRange.value = clamp(n, -2, 2);
+    if (hNum && document.activeElement !== hNum) hNum.value = n;
+    requestRender();
+  };
+  hRange?.addEventListener('input', e => setH(e.target.value));
+  hNum?.addEventListener('input', e => setH(e.target.value));
+  on('heightReset', 'click', () => { model.checkpoint(); model.setHeight(item.id, 0); syncInspectorValues(); requestRender(); });
+
+  const tf = (id, key, clampScale) => on(id, 'input', (e) => {
+    let v = numberOrNull(e.target.value);
+    if (v == null) return; // ignore partial input like "-"
+    if (clampScale) v = clamp(v, 0.01, 50);
+    model.setTransform(item.id, { [key]: v }, { checkpoint: false });
+    requestRender();
   });
-  tf('tfX', 'x'); tf('tfY', 'y'); tf('tfRot', 'rotation'); tf('tfScale', 'scale');
+  tf('tfX', 'x'); tf('tfY', 'y'); tf('tfRot', 'rotation'); tf('tfScale', 'scale', true);
   on('transformReset', 'click', () => { model.setTransform(item.id, { x: 0, y: 0, rotation: 0, scale: 1 }); renderInspector(); });
 
+  // parameters — each row has a slider and a free-typed number field
+  const def = item.shapeId ? getShape(item.shapeId) : null;
   el.querySelectorAll('input[data-param]').forEach(input => {
     input.addEventListener('input', () => {
-      const key = input.dataset.param;
-      model.setParam(item.id, key, input.value);
-      const valEl = document.getElementById('paramVal_' + key);
-      if (valEl) valEl.textContent = fmtParam(input.value, parseFloat(input.dataset.step));
+      let v = numberOrNull(input.value); if (v == null) return;
+      const step = parseFloat(input.dataset.step);
+      if (step >= 1) v = Math.round(v);
+      model.setParam(item.id, input.dataset.param, v);
+      const num = document.getElementById('paramNum_' + input.dataset.param);
+      if (num && document.activeElement !== num) num.value = fmtParam(v, step);
+      requestRender();
+    });
+  });
+  el.querySelectorAll('input[data-paramnum]').forEach(input => {
+    input.addEventListener('input', () => {
+      let v = numberOrNull(input.value); if (v == null) return;
+      const step = parseFloat(input.dataset.step);
+      if (step >= 1) v = Math.round(v);
+      model.setParam(item.id, input.dataset.paramnum, v); // any number, not clamped to the slider
+      const range = document.getElementById('param_' + input.dataset.paramnum);
+      if (range) {
+        const pdef = def?.params.find(p => p.key === input.dataset.paramnum);
+        range.value = pdef ? clamp(v, pdef.min, pdef.max) : v;
+      }
+      requestRender();
     });
   });
 
@@ -774,7 +1037,7 @@ function wireInspector(item) {
   if (code) {
     code.addEventListener('input', () => {
       model.setCustomCode(item.id, code.value);
-      $('#customError').classList.remove('visible');
+      $('#customError')?.classList.remove('visible');
     });
     el.querySelectorAll('[data-snippet]').forEach(btn => btn.addEventListener('click', () => {
       const snippets = {
@@ -806,7 +1069,6 @@ function buildShapeLibrary() {
   const grid = $('#shapeGrid');
   grid.innerHTML = '';
   thumbCanvases.length = 0;
-  const q = '';
 
   for (const cat of SHAPE_CATEGORIES) {
     const items = SHAPES.filter(s => s.cat === cat.id);
@@ -847,8 +1109,8 @@ function buildShapeLibrary() {
 function flashCard(btn) {
   try {
     btn.animate?.(
-      [{ boxShadow: '0 0 0 0 rgba(34,211,238,.6)' }, { boxShadow: '0 0 0 6px rgba(34,211,238,0)' }],
-      { duration: 450 }
+      [{ boxShadow: '0 0 0 0 rgba(30,39,51,.35)' }, { boxShadow: '0 0 0 6px rgba(30,39,51,0)' }],
+      { duration: 420 }
     );
   } catch { /* animation is decorative */ }
 }
@@ -874,16 +1136,13 @@ function paintField(canvas, fieldFn) {
       const wy = (0.5 - py / h) * 2.5 * (h / w);
       const d = fieldFn(wx, wy);
       let t = clamp(0.5 + 0.5 * d / falloff, 0, 1);
-      if (steps > 0) {
-        t = clamp((Math.floor(t * steps) + 0.5) / steps, 0, 1);
-      }
+      t = clamp((Math.floor(t * steps) + 0.5) / steps, 0, 1);
       let [r, g, b] = hexMix(cols.inside, cols.outside, t);
-      // boundary line
       const bl = 1 - clamp(Math.abs(d) / 0.045, 0, 1);
       const acc = parseInt(cols.accent.slice(1), 16);
-      r = r * (1 - bl * 0.85) + ((acc >> 16) & 255) * bl * 0.85;
-      g = g * (1 - bl * 0.85) + ((acc >> 8) & 255) * bl * 0.85;
-      b = b * (1 - bl * 0.85) + (acc & 255) * bl * 0.85;
+      r = r * (1 - bl * 0.9) + ((acc >> 16) & 255) * bl * 0.9;
+      g = g * (1 - bl * 0.9) + ((acc >> 8) & 255) * bl * 0.9;
+      b = b * (1 - bl * 0.9) + (acc & 255) * bl * 0.9;
       const i = (py * w + px) * 4;
       img.data[i] = r; img.data[i + 1] = g; img.data[i + 2] = b; img.data[i + 3] = 255;
     }
@@ -913,8 +1172,7 @@ function renderPresetThumbnails() {
     btn.title = `Load the “${preset.name}” preset`;
     const cv = document.createElement('canvas');
     cv.width = 132; cv.height = 74;
-    const cols = scene.colors;
-    paintFieldPreset(cv, scene, cols);
+    paintField(cv, (x, y) => evalScene(scene, x * 0.85, y * 0.85));
     const label = document.createElement('span');
     label.textContent = preset.name;
     btn.appendChild(cv);
@@ -925,32 +1183,6 @@ function renderPresetThumbnails() {
     });
     row.appendChild(btn);
   }
-}
-
-function paintFieldPreset(canvas, scene, cols) {
-  const ctx = canvas.getContext('2d');
-  const w = canvas.width, h = canvas.height;
-  const img = ctx.createImageData(w, h);
-  const range = 1.7;
-  for (let py = 0; py < h; py++) {
-    for (let px = 0; px < w; px++) {
-      const wx = (px / w - 0.5) * 2 * range;
-      const wy = (0.5 - py / h) * 2 * range * (h / w);
-      const d = evalScene(scene, wx, wy);
-      let t = clamp(0.5 + 0.5 * d / 1.1, 0, 1);
-      const steps = 9;
-      t = clamp((Math.floor(t * steps) + 0.5) / steps, 0, 1);
-      let [r, g, b] = hexMix(cols.inside, cols.outside, t);
-      const bl = 1 - clamp(Math.abs(d) / 0.05, 0, 1);
-      const acc = parseInt(cols.accent.slice(1), 16);
-      r = r * (1 - bl * 0.9) + ((acc >> 16) & 255) * bl * 0.9;
-      g = g * (1 - bl * 0.9) + ((acc >> 8) & 255) * bl * 0.9;
-      b = b * (1 - bl * 0.9) + (acc & 255) * bl * 0.9;
-      const i = (py * w + px) * 4;
-      img.data[i] = r; img.data[i + 1] = g; img.data[i + 2] = b; img.data[i + 3] = 255;
-    }
-  }
-  ctx.putImageData(img, 0, 0);
 }
 
 $('#shapeSearch').addEventListener('input', (e) => {
@@ -1008,7 +1240,6 @@ function syncSceneTab() {
   fmtContour();
 }
 
-// capture one checkpoint per adjustment-gesture
 ['falloffRange', 'stepsRange', 'lineEveryRange', 'lineStrengthRange'].forEach(id => {
   $('#' + id).addEventListener('pointerdown', () => model.checkpoint());
   $('#' + id).addEventListener('focus', () => model.checkpoint());
@@ -1034,7 +1265,7 @@ $('#snapChk').addEventListener('change', (e) => { model.setGridFlag('snap', e.ta
 
 const scheduleThumbRefresh = debounce(renderShapeThumbnails, 250);
 
-// tabs
+// left panel tabs
 $$('.panel-tab').forEach(tab => tab.addEventListener('click', () => {
   $$('.panel-tab').forEach(t => { t.classList.toggle('active', t === tab); t.setAttribute('aria-selected', String(t === tab)); });
   $('#tab-shapes').hidden = tab.dataset.tab !== 'shapes';
@@ -1070,26 +1301,25 @@ $('#btnConfirmClear').addEventListener('click', () => {
   toast('Scene cleared — browser copy wiped too', 'success');
 });
 
-// export modal
+// ── export (its own tab; live code preview) ──
 let currentExportTab = 'glsl';
-$('#btnExport').addEventListener('click', () => {
-  $('#exportModal').hidden = false;
-  refreshExportCode();
-  $$('.export-tab')[0].focus();
-});
-$$('.export-tab').forEach(tab => tab.addEventListener('click', () => {
+const EXPORT_LABELS = { glsl: 'Download .glsl', shadertoy: 'Download .shadertoy.glsl', hlsl: 'Download .hlsl', extrude: 'Download .extrude.glsl' };
+$('#btnExport').addEventListener('click', () => activateRTab('export'));
+$$('.export-target-btn').forEach(tab => tab.addEventListener('click', () => {
   currentExportTab = tab.dataset.exportTab;
-  $$('.export-tab').forEach(t => t.classList.toggle('active', t === tab));
-  refreshExportCode();
+  $$('.export-target-btn').forEach(t => t.classList.toggle('active', t === tab));
+  refreshExportCode(true);
 }));
-function refreshExportCode() {
-  $('#exportCode').textContent = buildExport(model.scene, currentExportTab);
-  $('#downloadCodeLabel').textContent = currentExportTab === 'glsl' ? 'Download .glsl' : currentExportTab === 'shadertoy' ? 'Download .shadertoy.glsl' : 'Download .extrude.glsl';
+function refreshExportCode(force = false) {
+  const pre = $('#exportCode');
+  if (!pre) return;
+  if (!force && $('#rtab-export').hidden) return; // don't burn CPU hidden — refresh on tab activation
+  pre.textContent = buildExport(model.scene, currentExportTab);
+  $('#downloadCodeLabel').textContent = EXPORT_LABELS[currentExportTab] || 'Download';
 }
 $$('.modal-backdrop').forEach(backdrop => {
   backdrop.addEventListener('click', (e) => { if (e.target === backdrop) backdrop.hidden = true; });
 });
-$$('[data-close-modal]').forEach(btn => btn.addEventListener('click', () => { btn.closest('.modal-backdrop').hidden = true; }));
 window.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') $$('.modal-backdrop').forEach(m => { m.hidden = true; });
 });
@@ -1109,7 +1339,7 @@ $('#btnCopyCode').addEventListener('click', async () => {
 });
 
 $('#btnDownloadCode').addEventListener('click', () => {
-  const suffix = currentExportTab === 'glsl' ? '.glsl' : currentExportTab === 'shadertoy' ? '.shadertoy.glsl' : '.extrude.glsl';
+  const suffix = { glsl: '.glsl', shadertoy: '.shadertoy.glsl', hlsl: '.hlsl', extrude: '.extrude.glsl' }[currentExportTab] || '.glsl';
   downloadText(slugify(model.scene.name) + suffix, $('#exportCode').textContent, 'text/plain');
 });
 $('#btnDownloadPng').addEventListener('click', () => {
@@ -1167,13 +1397,14 @@ window.addEventListener('keydown', (e) => {
 
   if (mod && key === 'z' && !e.shiftKey) { e.preventDefault(); if (model.undo()) afterHistoryJump(); return; }
   if (mod && (key === 'y' || (key === 'z' && e.shiftKey))) { e.preventDefault(); if (model.redo()) afterHistoryJump(); return; }
+  if (mod && key === 'a') { e.preventDefault(); model.selectAll(); refreshSelectionUI(); return; }
   if (mod && key === 'd') { e.preventDefault(); model.duplicateSelected(); return; }
   if (mod && key === 'g' && !e.shiftKey) { e.preventDefault(); model.groupSelected(); return; }
   if (mod && key === 'g' && e.shiftKey) { e.preventDefault(); model.ungroupSelected(); return; }
   if (mod && key === 's') { e.preventDefault(); $('#btnSaveProject').click(); return; }
-  if (mod && key === 'e') { e.preventDefault(); $('#btnExport').click(); return; }
+  if (mod && key === 'e') { e.preventDefault(); activateRTab('export'); return; }
   if (key === 'delete' || key === 'backspace') { e.preventDefault(); model.deleteSelected(); return; }
-  if (key === 'escape') { model.selectedId = null; refreshSelectionUI(); return; }
+  if (key === 'escape') { model.clearSelection(); refreshSelectionUI(); return; }
   if (key === 'f' || key === '0') { fitView(); return; }
   if (key === '+' || key === '=') { $('#btnZoomIn').click(); return; }
   if (key === '-') { $('#btnZoomOut').click(); return; }
@@ -1193,16 +1424,17 @@ function throttledNudge(dx, dy) {
   nudgeAt = Date.now();
   model.nudgeSelected(dx, dy);
   syncInspectorValues();
+  requestRender();
 }
 
-let nudgeCheckpointAt = 0;
+let rotateCheckpointAt = 0;
 function rotateSelected(deg) {
-  const item = selectedItem();
-  if (!item || item.kind === 'modifier') return;
-  if (Date.now() - nudgeCheckpointAt > 450) model.checkpoint();
-  nudgeCheckpointAt = Date.now();
-  model.setTransform(item.id, { rotation: ((item.transform.rotation || 0) + deg) }, { checkpoint: false });
+  if (!model.selectedIds.length) return;
+  if (Date.now() - rotateCheckpointAt > 450) model.checkpoint();
+  rotateCheckpointAt = Date.now();
+  model.rotateSelectedBy(deg);
   syncInspectorValues();
+  requestRender();
 }
 
 // ═══════════════ autosave & change plumbing ═══════════════
@@ -1217,26 +1449,30 @@ const scheduleAutosave = debounce(() => {
   }
 }, 450);
 
+// the preview shader is uniform-driven: value-only edits never change the
+// emitted GLSL, so compileIfChanged is a cheap string compare most of the time
 const scheduleCompile = debounce(() => {
   if (!renderer) return;
-  const result = renderer.compile(model.scene);
+  const result = renderer.compileIfChanged(model.scene);
   if (!result.ok) {
     showCustomError(result.error);
     toast('Shader error — check your custom SDF code', 'error');
   }
   requestRender();
-}, 140);
+}, 120);
+
+const scheduleExportRefresh = debounce(() => refreshExportCode(), 220);
 
 model.on((_scene, meta) => {
   scheduleAutosave();
   updateUndoButtons();
+  requestRender();
   if (meta?.structural) {
     renderLayers();
     renderInspector();
   }
-  // shape params & transforms are baked into the shader as literals,
-  // so every change needs a (debounced) recompile
   scheduleCompile();
+  scheduleExportRefresh();
 });
 
 function updateUndoButtons() {

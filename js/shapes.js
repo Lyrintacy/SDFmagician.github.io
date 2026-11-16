@@ -31,34 +31,40 @@ const JS_SDF = {
   },
 
   ellipse: (x, y, P) => {
-    // Inigo Quilez sdEllipse (exact); degenerates to a circle when rx == ry
-    if (Math.abs(P.rx - P.ry) < 1e-7) return Math.hypot(x, y) - P.rx;
-    let px = Math.abs(x), py = Math.abs(y);
-    let ax = P.rx, ay = P.ry;
-    if (px > py) { [px, py] = [py, px]; [ax, ay] = [ay, ax]; }
-    const l = ay * ay - ax * ax;
-    const m = (ax * px) / l, m2 = m * m;
-    const n = (ay * py) / l, n2 = n * n;
-    const c = (m2 + n2 - 1) / 3;
-    const c3 = c * c * c;
+    // iq exact method (https://iquilezles.org/articles/distfunctions2d/), guarded
+    if (Math.abs(P.rx - P.ry) < 1e-6) return Math.hypot(x, y) - P.rx;   // circle fast path
+    if (x === 0 && y === 0) return -Math.min(P.rx, P.ry);
+    let pX = Math.abs(x), pY = Math.abs(y);
+    let aX = P.rx, aY = P.ry;
+    if (pX > pY) { const t = pX; pX = pY; pY = t; const t2 = aX; aX = aY; aY = t2; }
+    const l = aY * aY - aX * aX;
+    const m = aX * pX / l;            const m2 = m * m;
+    const n = aY * pY / l;            const n2 = n * n;
+    const c = (m2 + n2 - 1) / 3;      const c3 = c * c * c;
     const q = c3 + m2 * n2 * 2;
     const d = c3 + m2 * n2;
     const g = m + m * n2;
     let co;
     if (d < 0) {
-      const p = Math.acos(clamp(q / c3, -1, 1)) / 3;
-      const s = Math.cos(p), t = Math.sin(p) * Math.sqrt(-3);
-      const rx = Math.sqrt(Math.max(-c * (s + t + 2) + m2, 0));
-      const ry = Math.sqrt(Math.max(-c * (s - t + 2) + m2, 0));
-      co = (ry + Math.sign(l) * rx + Math.abs(g) / (ry * rx) - m) * 0.5;
+      const h = Math.acos(Math.min(1, Math.max(-1, q / c3))) / 3;
+      const s = Math.cos(h);
+      const t = Math.sin(h) * Math.sqrt(3);
+      const rx = Math.sqrt(Math.max(0, -c * (s + t + 2) + m2));
+      const ry = Math.sqrt(Math.max(0, -c * (s - t + 2) + m2));
+      co = (ry + Math.sign(l) * rx + Math.abs(g) / Math.max(rx * ry, 1e-9) - m) / 2;
     } else {
       const h = 2 * m * n * Math.sqrt(d);
       const s = Math.sign(q + h) * Math.pow(Math.abs(q + h), 1 / 3);
-      const t = Math.sign(q - h) * Math.pow(Math.abs(q - h), 1 / 3);
-      co = (s + t + 2 * g - m * (s + t) * (s + t)) / (6 * l);
+      const u = Math.sign(q - h) * Math.pow(Math.abs(q - h), 1 / 3);
+      const rx = -s - u - c * 4 + 2 * m2;
+      const ry = (s - u) * Math.sqrt(3);
+      const rm = Math.sqrt(Math.max(0, rx * rx + ry * ry));
+      co = (ry / Math.sqrt(Math.max(rm - rx, 1e-9)) + 2 * g / Math.max(rm, 1e-9) - m) / 2;
     }
-    const rx = ax * co, ry = ay * Math.sqrt(Math.max(1 - co * co, 0));
-    return Math.hypot(rx - px, ry - py) * Math.sign(py - ry);
+    co = Math.min(1, Math.max(-1, co));
+    const ry2 = Math.sqrt(Math.max(0, 1 - co * co));
+    const dx = aX * co - pX, dy = aY * ry2 - pY;
+    return Math.hypot(dx, dy) * Math.sign(pY - aY * ry2);
   },
 
   triangle: (x, y, P) => {
@@ -118,15 +124,8 @@ const JS_SDF = {
   },
 
   moon: (x, y, P) => {
-    // inigo quilez sdMoon(p, d, ra, rb)
-    const px = Math.abs(x), py = y;
-    const d = P.d, ra = P.ra, rb = P.rb;
-    const a = (ra * ra - rb * rb + d * d) / (2 * d);
-    const b = Math.sqrt(Math.max(ra * ra - a * a, 0));
-    if (d * (px * b - py * a) > d * d * Math.max(b - py, 0)) {
-      return Math.hypot(px - a, py - b);
-    }
-    return Math.max(Math.hypot(px, py) - ra, -(Math.hypot(px - d, py) - rb));
+    // classic crescent: outer circle minus a shifted inner circle
+    return Math.max(Math.hypot(x, y) - P.ra, -(Math.hypot(x - P.d, y) - P.rb));
   },
 
   ring: (x, y, P) => Math.abs(Math.hypot(x, y) - P.r) - P.t,
@@ -268,9 +267,9 @@ export const SHAPES = [
     params: [{ key: 'r', label: 'Size', min: 0.1, max: 1.6, step: 0.01, def: 0.62 }] },
   { id: 'moon', name: 'Moon / Crescent', cat: 'curved',
     params: [
-      { key: 'd', label: 'Offset', min: 0.05, max: 1.6, step: 0.01, def: 0.55 },
-      { key: 'ra', label: 'Outer radius', min: 0.15, max: 2.0, step: 0.01, def: 0.72 },
-      { key: 'rb', label: 'Bite radius', min: 0.15, max: 2.0, step: 0.01, def: 0.66 }] },
+      { key: 'd', label: 'Offset', min: 0.05, max: 1.6, step: 0.01, def: 0.42 },
+      { key: 'ra', label: 'Outer radius', min: 0.15, max: 2.0, step: 0.01, def: 0.78 },
+      { key: 'rb', label: 'Bite radius', min: 0.15, max: 2.0, step: 0.01, def: 0.7 }] },
   { id: 'ring', name: 'Ring', cat: 'curved',
     params: [
       { key: 'r', label: 'Radius', min: 0.08, max: 2.0, step: 0.01, def: 0.62 },
@@ -307,6 +306,50 @@ export const SHAPES = [
   { id: 'mod_quad', name: 'Quad symmetry', cat: 'modifier', modifier: 'coord', mod: 'quad',
     glyph: '❖', params: [] },
 ];
+
+// ── direct-manipulation handles (anchor in LOCAL layer frame) ──
+// anchor(P) → [x, y]        where the grab dot sits
+// compute(local, P) → value  new param value while dragging
+const _hypot = (l) => Math.hypot(l[0], l[1]);
+const _absX = (l) => Math.abs(l[0]);
+const _absY = (l) => Math.abs(l[1]);
+
+export const SHAPE_HANDLES = {
+  circle:    [{ param: 'r',  anchor: P => [P.r, 0],  compute: _hypot }],
+  box:       [{ param: 'w',  anchor: P => [P.w, 0],  compute: _absX },
+              { param: 'h',  anchor: P => [0, P.h],  compute: _absY }],
+  rbox:      [{ param: 'w',  anchor: P => [P.w, 0],  compute: _absX },
+              { param: 'h',  anchor: P => [0, P.h],  compute: _absY }],
+  ellipse:   [{ param: 'rx', anchor: P => [P.rx, 0], compute: _absX },
+              { param: 'ry', anchor: P => [0, P.ry], compute: _absY }],
+  triangle:  [{ param: 'r',  anchor: P => [0, P.r],  compute: _hypot }],
+  rhombus:   [{ param: 'b',  anchor: P => [P.b, 0],  compute: _absX },
+              { param: 'h',  anchor: P => [0, P.h],  compute: _absY }],
+  capsule:   [{ param: 'len', anchor: P => [P.len / 2, 0], compute: l => Math.abs(l[0]) * 2 },
+              { param: 'r',  anchor: P => [0, P.r],  compute: _absY }],
+  line:      [{ param: 'w',  anchor: P => [0, P.w],  compute: _absY }],
+  trapezoid: [{ param: 'r2', anchor: P => [P.r2, P.he],  compute: _absX },
+              { param: 'r1', anchor: P => [P.r1, -P.he], compute: _absX },
+              { param: 'he', anchor: P => [0, P.he],     compute: _absY }],
+  polygon:   [{ param: 'r',  anchor: P => [0, P.r],  compute: _hypot }],
+  hexagon:   [{ param: 'r',  anchor: P => [0, P.r],  compute: _hypot }],
+  octagon:   [{ param: 'r',  anchor: P => [0, P.r],  compute: _hypot }],
+  star:      [{ param: 'r',     anchor: P => [0, P.r],        compute: _hypot },
+              { param: 'inner', anchor: P => [0, P.r * P.inner], compute: (l, P) => clamp(_hypot(l) / P.r, 0.05, 0.98) }],
+  heart:     [{ param: 'r',  anchor: P => [0, -P.r * 0.5], compute: l => _hypot(l) / 0.5 }],
+  moon:      [{ param: 'ra', anchor: P => [0, P.ra], compute: _hypot },
+              { param: 'rb', anchor: P => [P.d, P.rb], compute: _absY },
+              { param: 'd',  anchor: P => [P.d, 0],   compute: l => Math.max(0.05, l[0]) }],
+  ring:      [{ param: 'r',  anchor: P => [P.r, 0],     compute: _hypot },
+              { param: 't',  anchor: P => [P.r + P.t, 0], compute: (l, P) => _hypot(l) - P.r }],
+  cross:     [{ param: 'w',   anchor: P => [P.w, 0],   compute: _absX },
+              { param: 'arm', anchor: P => [0, P.arm], compute: _absY }],
+  roundedx:  [{ param: 'w',   anchor: P => [P.w * 0.7, P.w * 0.7], compute: l => _hypot(l) / 0.9899 }],
+  pie:       [{ param: 'r',     anchor: P => [0, P.r],  compute: _hypot },
+              { param: 'angle', anchor: P => [Math.sin(P.angle) * P.r * 0.75, Math.cos(P.angle) * P.r * 0.75],
+                compute: l => clamp(Math.abs(Math.atan2(l[0], l[1])), 0.05, 3.1) }],
+  vesica:    [{ param: 'd',  anchor: P => [P.d, 0], compute: (l, P) => clamp(_absX(l), 0.05, P.r * 0.99) }],
+};
 
 export function getShape(id) {
   return SHAPES.find(s => s.id === id) || null;
@@ -412,13 +455,8 @@ export function evalContainer(items, wx, wy) {
 
     let di;
     if (item.kind === 'group') {
-      const [lx, ly] = (() => {
-        const dx = wx - item.transform.x, dy = wy - item.transform.y;
-        const a = -((item.transform.rotation || 0) * Math.PI / 180);
-        return rot2(dx, dy, a);
-      })();
-      const s = item.transform.scale || 1;
-      di = evalContainer(item.children || [], lx / s, ly / s) * s - (item.height || 0);
+      // groups are pure containers — children always live in world space
+      di = evalContainer(item.children || [], wx, wy);
     } else {
       di = evalLeaf(item, wx, wy, coordOps);
     }

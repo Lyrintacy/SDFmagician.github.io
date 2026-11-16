@@ -1,6 +1,6 @@
 // ═══════════════════════════════════════════════════════════════
 // SDF Magician — document model: scene graph, history, presets,
-// persistence (localStorage) and project import/export
+// multi-selection, persistence, project import/export
 // ═══════════════════════════════════════════════════════════════
 
 import { getShape, defaultParams } from './shapes.js';
@@ -26,10 +26,10 @@ const clone = (o) => (typeof structuredClone === 'function' ? structuredClone(o)
 export function emptyScene() {
   return {
     app: 'sdf-magician',
-    version: 1,
+    version: 2,
     name: 'Untitled Scene',
-    colors: { inside: '#2dd4bf', outside: '#0b1020', accent: '#f8fafc', line: '#05070f' },
-    contour: { falloff: 2.5, steps: 14, lineEvery: 0.5, lineStrength: 0.4 },
+    colors: { inside: '#42536e', outside: '#c87c2c', accent: '#ffffff', line: '#16100a' },
+    contour: { falloff: 2.1, steps: 16, lineEvery: 0.32, lineStrength: 0.55 },
     grid: { show: true, axes: true, snap: false },
     items: [],
   };
@@ -38,7 +38,7 @@ export function emptyScene() {
 export function createItem(shapeId, nameOverride) {
   const def = getShape(shapeId);
   if (!def) return null;
-  const kind = !def ? 'shape' : def.modifier ? 'modifier' : 'shape';
+  const kind = def.modifier ? 'modifier' : 'shape';
   const item = {
     id: makeId(),
     kind,
@@ -68,7 +68,7 @@ export function createCustomItem() {
     height: 0,
     params: {
       code: [
-        '// p is the LOCAL point (already moved into this layer\u2019s frame).',
+        '// p is the LOCAL point (already moved into this layer’s frame).',
         '// Helpers available: sdCircle, sdBox, sdRoundedBox, sdRegularPolygon,',
         '//   sdStar, sdHeart, smin, smax, rot2, plus every shape you can add.',
         '// Return the signed distance as a float — negative is inside.',
@@ -87,8 +87,6 @@ export function createGroup(name = 'Group') {
     visible: true,
     blend: 'union',
     k: 0.28,
-    transform: { x: 0, y: 0, rotation: 0, scale: 1 },
-    height: 0,
     collapsed: false,
     children: [],
   };
@@ -111,8 +109,8 @@ export const PRESETS = [
     build() {
       const s = emptyScene();
       s.name = 'Smiley';
-      s.colors = { inside: '#fbbf24', outside: '#141006', accent: '#fff7ed', line: '#451a03' };
-      s.contour = { falloff: 2.2, steps: 10, lineEvery: 0.45, lineStrength: 0.3 };
+      s.colors = { inside: '#d99a2b', outside: '#241505', accent: '#ffe9c2', line: '#170c02' };
+      s.contour = { falloff: 2.1, steps: 14, lineEvery: 0.3, lineStrength: 0.5 };
       s.items = [
         mk('circle', 'Face', 0, 0.05, 'union', { r: 1.2 }),
         mk('circle', 'Eye · left', -0.44, 0.42, 'subtract', { r: 0.16 }),
@@ -127,8 +125,8 @@ export const PRESETS = [
     build() {
       const s = emptyScene();
       s.name = 'Gear';
-      s.colors = { inside: '#cbd5e1', outside: '#0b1020', accent: '#f8fafc', line: '#0f172a' };
-      s.contour = { falloff: 2.4, steps: 12, lineEvery: 0.4, lineStrength: 0.35 };
+      s.colors = { inside: '#4a5568', outside: '#c87c2c', accent: '#ffffff', line: '#16100a' };
+      s.contour = { falloff: 2.1, steps: 16, lineEvery: 0.32, lineStrength: 0.55 };
       s.items = [
         mk('star', 'Teeth', 0, 0, 'union', { r: 1.02, n: 9, inner: 0.84, sharp: 2.3 }),
         mk('circle', 'Body', 0, 0, 'union', { r: 0.82 }),
@@ -142,8 +140,8 @@ export const PRESETS = [
     build() {
       const s = emptyScene();
       s.name = 'Heart Charm';
-      s.colors = { inside: '#fb7185', outside: '#1a0710', accent: '#ffe4e6', line: '#4c0519' };
-      s.contour = { falloff: 2.3, steps: 12, lineEvery: 0.35, lineStrength: 0.35 };
+      s.colors = { inside: '#8a3b4d', outside: '#c87c2c', accent: '#ffe4e6', line: '#16100a' };
+      s.contour = { falloff: 2.1, steps: 16, lineEvery: 0.3, lineStrength: 0.55 };
       s.items = [
         mk('heart', 'Heart', 0, -0.08, 'union', { r: 0.8 }),
         mk('heart', 'Inner cut', 0, -0.02, 'subtract', { r: 0.47 }),
@@ -156,8 +154,8 @@ export const PRESETS = [
     build() {
       const s = emptyScene();
       s.name = 'Little Ghost';
-      s.colors = { inside: '#e2e8f0', outside: '#0b1020', accent: '#22d3ee', line: '#0f172a' };
-      s.contour = { falloff: 2.4, steps: 12, lineEvery: 0.4, lineStrength: 0.35 };
+      s.colors = { inside: '#556279', outside: '#1b1104', accent: '#a5f3fc', line: '#140c04' };
+      s.contour = { falloff: 2.1, steps: 14, lineEvery: 0.32, lineStrength: 0.5 };
       s.items = [
         mk('circle', 'Dome', 0, 0.3, 'union', { r: 0.7 }),
         mk('box', 'Skirt', 0, -0.35, 'union', { w: 0.7, h: 0.62 }),
@@ -215,20 +213,84 @@ function regenIds(item) {
   if (item.children) item.children.forEach(regenIds);
 }
 
-const rotateVec = (x, y, a) => {
-  const c = Math.cos(a), s = Math.sin(a);
-  return [c * x - s * y, s * x + c * y];
-};
+/** every selectable item under the given ids (groups count, leaves count) — DFS order */
+export function collectSelectedItems(items, selectedIds) {
+  const out = [];
+  const wanted = new Set(selectedIds);
+  const walk = (list) => {
+    for (const item of list) {
+      if (wanted.has(item.id)) out.push(item);
+      if (item.children) walk(item.children);
+    }
+  };
+  walk(items);
+  return out;
+}
+
+/** world-space centroid of a mixed selection (leaves + group contents) */
+export function selectionCentroid(items, selectedIds) {
+  const wanted = new Set(selectedIds);
+  let sx = 0, sy = 0, n = 0;
+  const walk = (list) => {
+    for (const item of list) {
+      if (item.kind === 'group') {
+        if (wanted.has(item.id)) {
+          // count every descendant drawable leaf of a selected group
+          const collect = (l) => l.forEach(i => {
+            if (i.kind === 'group') return collect(i.children || []);
+            if (i.kind === 'modifier') return;
+            sx += i.transform.x; sy += i.transform.y; n++;
+          });
+          collect(item.children || []);
+        } else {
+          walk(item.children || []);
+        }
+        continue;
+      }
+      if (wanted.has(item.id) && item.kind !== 'modifier') { sx += item.transform.x; sy += item.transform.y; n++; }
+    }
+  };
+  walk(items);
+  return n ? { x: sx / n, y: sy / n, count: n } : null;
+}
 
 // ── the store ───────────────────────────────────────────────────
 
 class Store {
   constructor() {
     this.scene = emptyScene();
-    this.selectedId = null;
+    this.selectedIds = [];
     this.undoStack = [];
     this.redoStack = [];
     this.listeners = new Set();
+  }
+
+  // ── selection ───────────────────────────────────────────────
+  /** primary = last-clicked selection (drives gizmos / single-edit inspector) */
+  get selectedId() { return this.selectedIds[this.selectedIds.length - 1] ?? null; }
+  set selectedId(v) { this.selectedIds = v == null ? [] : [v]; }
+
+  isSelected(id) { return this.selectedIds.includes(id); }
+  selCount() { return this.selectedIds.length; }
+  clearSelection() { this.selectedIds = []; }
+  selectOnly(id) { this.selectedIds = id ? [id] : []; }
+  toggleSelected(id) {
+    const i = this.selectedIds.indexOf(id);
+    if (i >= 0) this.selectedIds.splice(i, 1);
+    else this.selectedIds.push(id);
+  }
+  selectAll() {
+    this.selectedIds = [];
+    const walk = (list) => list.forEach(i => { if (i.kind !== 'modifier') this.selectedIds.push(i.id); if (i.children) walk(i.children); });
+    walk(this.scene.items);
+  }
+  selectedItems() {
+    const out = [];
+    for (const id of this.selectedIds) {
+      const f = findItem(this.scene.items, id);
+      if (f) out.push(f.item);
+    }
+    return out;
   }
 
   // ── lifecycle & events ──────────────────────────────────────
@@ -260,11 +322,15 @@ class Store {
 
   touch(meta = {}) { this.emit({ ...meta, dirty: true }); }
 
+  _validateSelection() {
+    this.selectedIds = this.selectedIds.filter(id => findItem(this.scene.items, id));
+  }
+
   undo() {
     if (!this.undoStack.length) return false;
     this.redoStack.push(this.snapshot());
     this.scene = JSON.parse(this.undoStack.pop());
-    if (this.selectedId && !findItem(this.scene.items, this.selectedId)) this.selectedId = null;
+    this._validateSelection();
     this.emit({ dirty: true, structural: true });
     return true;
   }
@@ -273,7 +339,7 @@ class Store {
     if (!this.redoStack.length) return false;
     this.undoStack.push(this.snapshot());
     this.scene = JSON.parse(this.redoStack.pop());
-    if (this.selectedId && !findItem(this.scene.items, this.selectedId)) this.selectedId = null;
+    this._validateSelection();
     this.emit({ dirty: true, structural: true });
     return true;
   }
@@ -289,10 +355,8 @@ class Store {
 
   clearScene() {
     this.checkpoint();
-    const name = 'Untitled Scene';
     this.scene = emptyScene();
-    this.scene.name = name;
-    this.selectedId = null;
+    this.selectedIds = [];
     try { localStorage.removeItem(STORAGE_KEY); } catch { /* ignore */ }
     this.touch({ structural: true });
   }
@@ -302,14 +366,14 @@ class Store {
     if (!preset) return;
     this.checkpoint();
     this.scene = preset.build();
-    this.selectedId = null;
+    this.selectedIds = [];
     this.touch({ structural: true });
   }
 
   replaceScene(scene) {
     this.checkpoint();
     this.scene = scene;
-    this.selectedId = null;
+    this.selectedIds = [];
     this.touch({ structural: true });
   }
 
@@ -320,7 +384,7 @@ class Store {
     this.checkpoint();
     item.name = uniqueName(this.scene.items, item.name);
     this.scene.items.push(item);
-    this.selectedId = item.id;
+    this.selectedIds = [item.id];
     this.touch({ structural: true });
     return item;
   }
@@ -330,7 +394,7 @@ class Store {
     const item = createCustomItem();
     item.name = uniqueName(this.scene.items, item.name);
     this.scene.items.push(item);
-    this.selectedId = item.id;
+    this.selectedIds = [item.id];
     this.touch({ structural: true });
     return item;
   }
@@ -342,26 +406,51 @@ class Store {
     if (!found) return;
     this.checkpoint();
     found.list.splice(found.index, 1);
-    if (this.selectedId === id) this.selectedId = null;
+    this.selectedIds = this.selectedIds.filter(s => s !== id);
     this.touch({ structural: true });
   }
 
-  deleteSelected() { if (this.selectedId) this.deleteItem(this.selectedId); }
-
-  duplicateItem(id) {
-    const found = findItem(this.scene.items, id);
-    if (!found) return null;
+  deleteSelected() {
+    if (!this.selectedIds.length) return;
     this.checkpoint();
-    const copy = clone(found.item);
-    regenIds(copy);
-    copy.name = uniqueName(this.scene.items, copy.name.replace(/ \d+$/, ''));
-    found.list.splice(found.index + 1, 0, copy);
-    this.selectedId = copy.id;
+    const ids = new Set(this.selectedIds);
+    const prune = (list) => {
+      for (let i = list.length - 1; i >= 0; i--) {
+        const it = list[i];
+        if (ids.has(it.id)) { list.splice(i, 1); continue; }
+        if (it.children) prune(it.children);
+      }
+    };
+    prune(this.scene.items);
+    this.selectedIds = [];
     this.touch({ structural: true });
-    return copy;
   }
 
-  duplicateSelected() { return this.selectedId ? this.duplicateItem(this.selectedId) : null; }
+  duplicateSelected() {
+    if (!this.selectedIds.length) return;
+    this.checkpoint();
+    const newIds = [];
+    const dupAfter = (list, i) => {
+      const original = list[i];
+      if (!this.selectedIds.includes(original.id)) return;
+      const copy = clone(original);
+      regenIds(copy);
+      copy.name = uniqueName(this.scene.items, copy.name.replace(/ \d+$/, ''));
+      list.splice(i + 1, 0, copy);
+      newIds.push(copy.id);
+    };
+    // clone each selected subtree whole, in-place
+    const walk = (list) => {
+      for (let i = list.length - 1; i >= 0; i--) {
+        if (this.selectedIds.includes(list[i].id)) { dupAfter(list, i); continue; }
+        if (list[i].children) walk(list[i].children);
+      }
+    };
+    walk(this.scene.items);
+    this.selectedIds = newIds;
+    this.touch({ structural: true });
+    return newIds;
+  }
 
   toggleVisible(id) {
     const found = findItem(this.scene.items, id);
@@ -386,6 +475,16 @@ class Store {
     this.touch({ structural: true });
   }
 
+  /** apply a value to every selected item that supports it */
+  setBlendForSelection(blend) {
+    this.checkpoint();
+    for (const id of this.selectedIds) {
+      const f = findItem(this.scene.items, id);
+      if (f && f.item.kind !== 'modifier') f.item.blend = blend;
+    }
+    this.touch({ structural: true });
+  }
+
   setK(id, k) {
     const found = findItem(this.scene.items, id);
     if (!found) return;
@@ -393,10 +492,28 @@ class Store {
     this.touch();
   }
 
+  setKForSelection(k) {
+    const kk = Math.min(1.5, Math.max(0.01, Number(k) || 0.01));
+    for (const id of this.selectedIds) {
+      const f = findItem(this.scene.items, id);
+      if (f && f.item.kind !== 'modifier') f.item.k = kk;
+    }
+    this.touch();
+  }
+
   setHeight(id, h) {
     const found = findItem(this.scene.items, id);
     if (!found) return;
-    found.item.height = Math.min(2, Math.max(-2, Number(h) || 0));
+    found.item.height = Math.min(50, Math.max(-50, Number(h) || 0));
+    this.touch();
+  }
+
+  setHeightForSelection(h) {
+    const hh = Math.min(50, Math.max(-50, Number(h) || 0));
+    for (const id of this.selectedIds) {
+      const f = findItem(this.scene.items, id);
+      if (f && f.item.kind !== 'modifier' && f.item.kind !== 'group') f.item.height = hh;
+    }
     this.touch();
   }
 
@@ -422,13 +539,75 @@ class Store {
     this.touch();
   }
 
+  /** translate every selected drawable (groups move their contents) */
   nudgeSelected(dx, dy) {
-    if (!this.selectedId) return;
-    const found = findItem(this.scene.items, this.selectedId);
-    if (!found) return;
-    found.item.transform.x += dx;
-    found.item.transform.y += dy;
+    if (!this.selectedIds.length) return;
+    this._eachSelectedTransformable((item) => {
+      item.transform.x += dx;
+      item.transform.y += dy;
+    });
     this.touch();
+  }
+
+  rotateSelectedBy(deltaDeg, pivot) {
+    if (!this.selectedIds.length) return;
+    const rad = (deltaDeg || 0) * Math.PI / 180;
+    const c = pivot || this.selectionPivot();
+    this._eachSelectedTransformable((item) => {
+      const T = item.transform;
+      if (c) {
+        const dx = T.x - c.x, dy = T.y - c.y;
+        const cos = Math.cos(rad), sin = Math.sin(rad);
+        T.x = c.x + cos * dx - sin * dy;
+        T.y = c.y + sin * dx + cos * dy;
+      }
+      T.rotation = ((T.rotation || 0) + deltaDeg) % 360;
+    });
+    this.touch();
+  }
+
+  scaleSelectedBy(factor, pivot) {
+    if (!this.selectedIds.length) return;
+    const f = Math.min(20, Math.max(0.05, factor || 1));
+    const c = pivot || this.selectionPivot();
+    this._eachSelectedTransformable((item) => {
+      const T = item.transform;
+      if (c) {
+        T.x = c.x + (T.x - c.x) * f;
+        T.y = c.y + (T.y - c.y) * f;
+      }
+      T.scale = Math.min(50, Math.max(0.01, (T.scale || 1) * f));
+    });
+    this.touch();
+  }
+
+  /** pivot for rotate/scale gizmos: own centroid when multi, else self */
+  selectionPivot() {
+    const centroid = selectionCentroid(this.scene.items, this.selectedIds);
+    return centroid ? { x: centroid.x, y: centroid.y } : null;
+  }
+
+  /** iterate selected items, expanding groups into their descendant leaves */
+  _eachSelectedTransformable(fn) {
+    const wanted = new Set(this.selectedIds);
+    const walk = (list) => {
+      for (const item of list) {
+        if (item.kind === 'group') {
+          if (wanted.has(item.id)) {
+            // group selected as a unit → move all descendant leaves
+            const leaves = [];
+            const collect = (l) => l.forEach(i => i.kind === 'group' ? collect(i.children || []) : leaves.push(i));
+            collect(item.children || []);
+            leaves.forEach(fn);
+          } else {
+            walk(item.children || []);
+          }
+          continue;
+        }
+        if (wanted.has(item.id) && item.kind !== 'modifier') fn(item);
+      }
+    };
+    walk(this.scene.items);
   }
 
   toggleCollapsed(id) {
@@ -439,69 +618,61 @@ class Store {
     }
   }
 
-  /** Wrap the selected item in a new group (or create an empty group). */
+  /** wrap ALL selected items in one new group (appended at root top) */
   groupSelected() {
     this.checkpoint();
     const group = createGroup(uniqueName(this.scene.items, 'Group'));
-    if (this.selectedId) {
-      const found = findItem(this.scene.items, this.selectedId);
-      if (found) {
-        found.list.splice(found.index, 1);
-        // keep the group near where the layer was
-        const parent = found.list === this.scene.items ? this.scene.items : found.list;
-        group.transform = { ...found.item.transform };
-        // undo the child's own transform now that the group carries it? No —
-        // keep child local; just reset child's transform so it stays put visually.
-        found.item.transform = { x: 0, y: 0, rotation: 0, scale: 1 };
-        group.children.push(found.item);
-        parent.splice(Math.min(found.index, parent.length), 0, group);
-      } else {
-        this.scene.items.push(group);
+    const wanted = new Set(this.selectedIds);
+    const detached = [];
+    const collect = (list) => {
+      for (let i = list.length - 1; i >= 0; i--) {
+        const it = list[i];
+        if (wanted.has(it.id)) {
+          detached.unshift(it);
+          list.splice(i, 1);
+          continue;
+        }
+        if (it.children) collect(it.children);
       }
+    };
+    collect(this.scene.items);
+    if (!detached.length) {
+      this.scene.items.push(group);
     } else {
+      group.children = detached;
       this.scene.items.push(group);
     }
-    this.selectedId = group.id;
+    this.selectedIds = [group.id];
     this.touch({ structural: true });
+    return group;
   }
 
-  /** Dissolve a group: children keep world placement via transform composition. */
+  /** dissolve every selected group; children keep their (world) placement */
   ungroupSelected() {
-    if (!this.selectedId) return;
-    const found = findItem(this.scene.items, this.selectedId);
-    if (!found || found.item.kind !== 'group') return;
+    const groups = this.selectedItems().filter(i => i.kind === 'group');
+    if (!groups.length) return;
     this.checkpoint();
-    const g = found.item;
-    const G = g.transform;
-    const gRad = (G.rotation || 0) * Math.PI / 180;
-    const gs = G.scale || 1;
-    for (const child of g.children) {
-      const C = child.transform;
-      const cRad = (C.rotation || 0) * Math.PI / 180;
-      const [rx, ry] = rotateVec(C.x, C.y, gRad);
-      child.transform = {
-        x: G.x + gs * rx,
-        y: G.y + gs * ry,
-        rotation: (G.rotation || 0) + (C.rotation || 0),
-        scale: gs * (C.scale || 1),
-      };
+    const newSelection = [];
+    for (const g of groups) {
+      const found = findItem(this.scene.items, g.id);
+      if (!found) continue;
+      const children = found.item.children || [];
+      found.list.splice(found.index, 1, ...children);
+      newSelection.push(...children.map(c => c.id));
     }
-    found.list.splice(found.index, 1, ...g.children);
-    this.selectedId = g.children[0]?.id ?? null;
+    this.selectedIds = newSelection;
     this.touch({ structural: true });
   }
 
-  /** Reorder / re-nest via drag & drop. */
+  /** reorder / re-nest via drag & drop */
   moveItem(id, targetId, position /* 'before' | 'after' | 'inside' */) {
     if (id === targetId) return;
     const src = findItem(this.scene.items, id);
     const dst = findItem(this.scene.items, targetId);
     if (!src || !dst) return;
-    // prevent nesting a group into itself or its own descendants
     if (src.item.kind === 'group' && (dst.path || []).some(a => a.id === id)) return;
     this.checkpoint();
     src.list.splice(src.index, 1);
-    // re-find destination after removal (indices may shift)
     const dst2 = findItem(this.scene.items, targetId);
     if (!dst2) { this.scene.items.push(src.item); }
     else if (position === 'inside' && dst2.item.kind === 'group') {
@@ -511,7 +682,6 @@ class Store {
       const at = dst2.index + (position === 'after' ? 1 : 0);
       dst2.list.splice(at, 0, src.item);
     }
-    this.selectedId = id;
     this.touch({ structural: true });
   }
 
@@ -522,7 +692,6 @@ class Store {
     src.list.splice(src.index, 1);
     const at = Math.min(Math.max(0, index), this.scene.items.length);
     this.scene.items.splice(at, 0, src.item);
-    this.selectedId = id;
     this.touch({ structural: true });
   }
 
@@ -566,19 +735,22 @@ function sanitizeItem(raw, depth = 0) {
   const item = {
     id: typeof raw.id === 'string' && raw.id ? raw.id : makeId(),
     kind: isGroup ? 'group' : raw.kind === 'custom' ? 'custom' : def.modifier ? 'modifier' : 'shape',
-    shapeId: raw.shapeId,
+    shapeId: isGroup ? 'group' : raw.shapeId,
     name: typeof raw.name === 'string' ? raw.name.slice(0, 64) : 'Layer',
     visible: raw.visible !== false,
     blend: BLEND_IDS.has(raw.blend) ? raw.blend : 'union',
     k: clampNum(raw.k, 0.01, 1.5, 0.28),
-    transform: {
+  };
+
+  if (item.kind !== 'modifier' && item.kind !== 'group') {
+    item.transform = {
       x: clampNum(raw.transform?.x, -100, 100, 0),
       y: clampNum(raw.transform?.y, -100, 100, 0),
       rotation: clampNum(raw.transform?.rotation, -3600, 3600, 0),
       scale: clampNum(raw.transform?.scale, 0.01, 50, 1),
-    },
-    height: clampNum(raw.height, -2, 2, 0),
-  };
+    };
+    item.height = clampNum(raw.height, -2, 2, 0);
+  }
 
   if (isGroup) {
     item.collapsed = !!raw.collapsed;
@@ -600,7 +772,6 @@ function sanitizeItem(raw, depth = 0) {
 export function sanitizeScene(raw) {
   if (!raw || typeof raw !== 'object') return null;
   const items = Array.isArray(raw.items) ? raw.items.map(i => sanitizeItem(i, 0)).filter(Boolean) : [];
-  // ensure unique ids
   const seen = new Set();
   const walk = (list) => list.forEach(i => {
     if (seen.has(i.id)) i.id = makeId();
@@ -611,19 +782,19 @@ export function sanitizeScene(raw) {
   const hex = (v, dflt) => (typeof v === 'string' && /^#[0-9a-f]{6}$/i.test(v) ? v : dflt);
   return {
     app: 'sdf-magician',
-    version: 1,
+    version: 2,
     name: typeof raw.name === 'string' && raw.name.trim() ? raw.name.slice(0, 80) : 'Untitled Scene',
     colors: {
-      inside: hex(raw.colors?.inside, '#2dd4bf'),
-      outside: hex(raw.colors?.outside, '#0b1020'),
-      accent: hex(raw.colors?.accent, '#f8fafc'),
-      line: hex(raw.colors?.line, '#05070f'),
+      inside: hex(raw.colors?.inside, '#42536e'),
+      outside: hex(raw.colors?.outside, '#c87c2c'),
+      accent: hex(raw.colors?.accent, '#ffffff'),
+      line: hex(raw.colors?.line, '#16100a'),
     },
     contour: {
-      falloff: clampNum(raw.contour?.falloff, 0.6, 6, 2.5),
-      steps: Math.round(clampNum(raw.contour?.steps, 0, 48, 14)),
-      lineEvery: clampNum(raw.contour?.lineEvery, 0, 1.5, 0.5),
-      lineStrength: clampNum(raw.contour?.lineStrength, 0, 1, 0.4),
+      falloff: clampNum(raw.contour?.falloff, 0.6, 6, 2.1),
+      steps: Math.round(clampNum(raw.contour?.steps, 0, 48, 16)),
+      lineEvery: clampNum(raw.contour?.lineEvery, 0, 1.5, 0.32),
+      lineStrength: clampNum(raw.contour?.lineStrength, 0, 1, 0.55),
     },
     grid: {
       show: raw.grid?.show !== false,

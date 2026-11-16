@@ -3,14 +3,18 @@
 // Builds the live-preview fragment shader AND the human-readable
 // export code from the same scene graph, so what you see is
 // literally what you export.
+//
+// Preview: every layer gets a slot; transforms / params / heights /
+// blend radii / modifier params are UNIFORMS, so editing never
+// needs a recompile (the renderer lerps them on the GPU side).
+// Export:  same graph, literal values, fully commented code.
 // ═══════════════════════════════════════════════════════════════
 
 import { getShape } from './shapes.js';
 
 const F = (n) => {
   const v = Number(n) || 0;
-  const s = v.toFixed(4);
-  return s;
+  return v.toFixed(4);
 };
 const RAD = (deg) => (Number(deg) || 0) * Math.PI / 180;
 
@@ -43,31 +47,38 @@ const HELPERS = {
   return sdBox(p, b - r) - r;
 }`, deps: ['sdBox'] },
 
-  sdEllipse: { code: `// exact signed distance — inigo quilez
+sdEllipse: { code: `// iq exact method — https://iquilezles.org/articles/distfunctions2d/ (guarded)
 float sdEllipse(vec2 p, vec2 ab) {
-  if (abs(ab.x - ab.y) < 1e-7) return length(p) - ab.x;
-  p = abs(p);
-  if (p.x > p.y) { p = p.yx; ab = ab.yx; }
-  float l = ab.y * ab.y - ab.x * ab.x;
-  float m = ab.x * p.x / l, m2 = m * m;
-  float n = ab.y * p.y / l, n2 = n * n;
-  float c = (m2 + n2 - 1.0) / 3.0, c3 = c * c * c;
-  float q = c3 + m2 * n2 * 2.0, d = c3 + m2 * n2, g = m + m * n2;
+  if (abs(ab.x - ab.y) < 1e-6) return length(p) - ab.x;   // circle fast path
+  p = abs(p); if (p.x > p.y) { p = p.yx; ab = ab.yx; }
+  if (p.x == 0.0 && p.y == 0.0) return -min(ab.x, ab.y);
+  float l = ab.y*ab.y - ab.x*ab.x;
+  float m = ab.x*p.x/l;      float m2 = m*m;
+  float n = ab.y*p.y/l;      float n2 = n*n;
+  float c = (m2+n2-1.0)/3.0; float c3 = c*c*c;
+  float q = c3 + m2*n2*2.0;
+  float d = c3 + m2*n2;
+  float g = m + m*n2;
   float co;
   if (d < 0.0) {
-    float p3 = acos(clamp(q / c3, -1.0, 1.0)) / 3.0;
-    float s = cos(p3), t = sin(p3) * sqrt(-3.0);
-    float rx = sqrt(max(-c * (s + t + 2.0) + m2, 0.0));
-    float ry = sqrt(max(-c * (s - t + 2.0) + m2, 0.0));
-    co = (ry + sign(l) * rx + abs(g) / (ry * rx) - m) * 0.5;
+    float h = acos(clamp(q/c3, -1.0, 1.0))/3.0;
+    float s = cos(h);
+    float t = sin(h)*sqrt(3.0);
+    float rx = sqrt(max(0.0, -c*(s + t + 2.0) + m2));
+    float ry = sqrt(max(0.0, -c*(s - t + 2.0) + m2));
+    co = (ry + sign(l)*rx + abs(g)/max(rx*ry, 1e-9) - m)/2.0;
   } else {
-    float h = 2.0 * m * n * sqrt(d);
-    float s = sign(q + h) * pow(abs(q + h), 1.0 / 3.0);
-    float t = sign(q - h) * pow(abs(q - h), 1.0 / 3.0);
-    co = (s + t + 2.0 * g - m * (s + t) * (s + t)) / (6.0 * l);
+    float h = 2.0*m*n*sqrt(d);
+    float s = sign(q+h)*pow(abs(q+h), 1.0/3.0);
+    float u = sign(q-h)*pow(abs(q-h), 1.0/3.0);
+    float rx = -s - u - c*4.0 + 2.0*m2;
+    float ry = (s - u)*sqrt(3.0);
+    float rm = sqrt(max(0.0, rx*rx + ry*ry));
+    co = (ry/sqrt(max(rm-rx, 1e-9)) + 2.0*g/max(rm, 1e-9) - m)/2.0;
   }
-  vec2 r = ab * vec2(co, sqrt(max(1.0 - co * co, 0.0)));
-  return length(r - p) * sign(p.y - r.y);
+  co = clamp(co, -1.0, 1.0);
+  vec2 r = ab * vec2(co, sqrt(max(0.0, 1.0 - co*co)));
+  return length(r-p) * sign(p.y-r.y);
 }`, deps: [] },
 
   sdEquilateralTriangle: { code: `float sdEquilateralTriangle(vec2 p, float r) {
@@ -115,12 +126,7 @@ float sdHeart(vec2 p, float s) {
   return d * s;
 }`, deps: [] },
 
-  sdMoon: { code: `// inigo quilez
-float sdMoon(vec2 p, float d, float ra, float rb) {
-  p = abs(p);
-  float a = (ra * ra - rb * rb + d * d) / (2.0 * d);
-  float b = sqrt(max(ra * ra - a * a, 0.0));
-  if (d * (p.x * b - p.y * a) > d * d * max(b - p.y, 0.0)) return length(p - vec2(a, b));
+  sdMoon: { code: `float sdMoon(vec2 p, float d, float ra, float rb) {
   return max(length(p) - ra, -(length(p - vec2(d, 0.0)) - rb));
 }`, deps: [] },
 
@@ -183,6 +189,8 @@ float sdCapsule(vec2 p, float len, float r) {
   sdLine: { code: `float sdLine(vec2 p, float w) { return abs(p.y) - w; }`, deps: [] },
 };
 
+const HELPER_NAMES = Object.keys(HELPERS);
+
 function collectHelpers(used) {
   const out = [];
   const seen = new Set();
@@ -196,30 +204,40 @@ function collectHelpers(used) {
   return out.join('\n\n');
 }
 
+/** also scan custom user code for helper references so nothing is missing */
+function scanCustomCode(code, used) {
+  for (const name of HELPER_NAMES) {
+    if (code && code.includes(name)) used.add(name);
+  }
+}
+
 // ── shape → helper call ─────────────────────────────────────────
+// each entry: deps + call(q, paramsExpr) — paramsExpr maps key → float expr
 
 const SHAPE_GLSL = {
-  circle:   { fn: 'sdCircle',   deps: ['sdCircle'],          call: (q, p) => `sdCircle(${q}, ${F(p.r)})` },
-  box:      { fn: 'sdBox',      deps: ['sdBox'],             call: (q, p) => `sdBox(${q}, vec2(${F(p.w)}, ${F(p.h)}))` },
-  rbox:     { fn: 'sdRoundedBox', deps: ['sdRoundedBox', 'sdBox'], call: (q, p) => `sdRoundedBox(${q}, vec2(${F(p.w)}, ${F(p.h)}), ${F(p.r)})` },
-  ellipse:  { fn: 'sdEllipse',  deps: ['sdEllipse'],         call: (q, p) => `sdEllipse(${q}, vec2(${F(p.rx)}, ${F(p.ry)}))` },
-  triangle: { fn: 'sdEquilateralTriangle', deps: ['sdEquilateralTriangle'], call: (q, p) => `sdEquilateralTriangle(${q}, ${F(p.r)})` },
-  rhombus:  { fn: 'sdRhombus',  deps: ['sdRhombus'],         call: (q, p) => `sdRhombus(${q}, ${F(p.b)}, ${F(p.h)})` },
-  capsule:  { fn: 'sdCapsule',  deps: ['sdCapsule'],         call: (q, p) => `sdCapsule(${q}, ${F(p.len)}, ${F(p.r)})` },
-  line:     { fn: 'sdLine',     deps: ['sdLine'],            call: (q, p) => `sdLine(${q}, ${F(p.w)})` },
-  trapezoid:{ fn: 'sdTrapezoid',deps: ['sdTrapezoid'],       call: (q, p) => `sdTrapezoid(${q}, ${F(p.r1)}, ${F(p.r2)}, ${F(p.he)})` },
-  polygon:  { fn: 'sdRegularPolygon', deps: ['sdRegularPolygon'], call: (q, p) => `sdRegularPolygon(${q}, ${F(p.r)}, ${F(Math.round(p.n))})` },
-  hexagon:  { fn: 'sdRegularPolygon', deps: ['sdRegularPolygon'], call: (q, p) => `sdRegularPolygon(${q}, ${F(p.r)}, 6.0)` },
-  octagon:  { fn: 'sdRegularPolygon', deps: ['sdRegularPolygon'], call: (q, p) => `sdRegularPolygon(${q}, ${F(p.r)}, 8.0)` },
-  star:     { fn: 'sdStar',     deps: ['sdStar'],            call: (q, p) => `sdStar(${q}, ${F(p.r)}, ${F(Math.round(p.n))}, ${F(p.inner)}, ${F(p.sharp ?? 1.7)})` },
-  heart:    { fn: 'sdHeart',    deps: ['sdHeart'],           call: (q, p) => `sdHeart(${q}, ${F(p.r)})` },
-  moon:     { fn: 'sdMoon',     deps: ['sdMoon'],            call: (q, p) => `sdMoon(${q}, ${F(p.d)}, ${F(p.ra)}, ${F(p.rb)})` },
-  ring:     { fn: 'sdRing',     deps: ['sdRing'],            call: (q, p) => `sdRing(${q}, ${F(p.r)}, ${F(p.t)})` },
-  cross:    { fn: 'sdCross',    deps: ['sdCross', 'sdBox'],  call: (q, p) => `sdCross(${q}, ${F(p.w)}, ${F(p.arm)}, ${F(p.r)})` },
-  roundedx: { fn: 'sdRoundedX', deps: ['sdRoundedX'],        call: (q, p) => `sdRoundedX(${q}, ${F(p.w)}, ${F(p.r)})` },
-  pie:      { fn: 'sdPie',      deps: ['sdPie'],             call: (q, p) => `sdPie(${q}, ${F(p.angle)}, ${F(p.r)})` },
-  vesica:   { fn: 'sdVesica',   deps: ['sdVesica'],          call: (q, p) => `sdVesica(${q}, ${F(p.r)}, ${F(p.d)})` },
+  circle:   { deps: ['sdCircle'],              argKeys: ['r'],                 call: (q, a) => `sdCircle(${q}, ${a.r})` },
+  box:      { deps: ['sdBox'],                 argKeys: ['w', 'h'],            call: (q, a) => `sdBox(${q}, vec2(${a.w}, ${a.h}))` },
+  rbox:     { deps: ['sdRoundedBox', 'sdBox'], argKeys: ['w', 'h', 'r'],       call: (q, a) => `sdRoundedBox(${q}, vec2(${a.w}, ${a.h}), ${a.r})` },
+  ellipse:  { deps: ['sdEllipse'],             argKeys: ['rx', 'ry'],          call: (q, a) => `sdEllipse(${q}, vec2(${a.rx}, ${a.ry}))` },
+  triangle: { deps: ['sdEquilateralTriangle'], argKeys: ['r'],                 call: (q, a) => `sdEquilateralTriangle(${q}, ${a.r})` },
+  rhombus:  { deps: ['sdRhombus'],             argKeys: ['b', 'h'],            call: (q, a) => `sdRhombus(${q}, ${a.b}, ${a.h})` },
+  capsule:  { deps: ['sdCapsule'],             argKeys: ['len', 'r'],          call: (q, a) => `sdCapsule(${q}, ${a.len}, ${a.r})` },
+  line:     { deps: ['sdLine'],                argKeys: ['w'],                 call: (q, a) => `sdLine(${q}, ${a.w})` },
+  trapezoid:{ deps: ['sdTrapezoid'],           argKeys: ['r1', 'r2', 'he'],    call: (q, a) => `sdTrapezoid(${q}, ${a.r1}, ${a.r2}, ${a.he})` },
+  polygon:  { deps: ['sdRegularPolygon'],      argKeys: ['r', 'n'],            call: (q, a) => `sdRegularPolygon(${q}, ${a.r}, ${a.n})` },
+  hexagon:  { deps: ['sdRegularPolygon'],      argKeys: ['r'],                 call: (q, a) => `sdRegularPolygon(${q}, ${a.r}, 6.0)` },
+  octagon:  { deps: ['sdRegularPolygon'],      argKeys: ['r'],                 call: (q, a) => `sdRegularPolygon(${q}, ${a.r}, 8.0)` },
+  star:     { deps: ['sdStar'],                argKeys: ['r', 'n', 'inner', 'sharp'], call: (q, a) => `sdStar(${q}, ${a.r}, ${a.n}, ${a.inner}, ${a.sharp})` },
+  heart:    { deps: ['sdHeart'],               argKeys: ['r'],                 call: (q, a) => `sdHeart(${q}, ${a.r})` },
+  moon:     { deps: ['sdMoon'],                argKeys: ['d', 'ra', 'rb'],     call: (q, a) => `sdMoon(${q}, ${a.d}, ${a.ra}, ${a.rb})` },
+  ring:     { deps: ['sdRing'],                argKeys: ['r', 't'],            call: (q, a) => `sdRing(${q}, ${a.r}, ${a.t})` },
+  cross:    { deps: ['sdCross', 'sdBox'],      argKeys: ['w', 'arm', 'r'],     call: (q, a) => `sdCross(${q}, ${a.w}, ${a.arm}, ${a.r})` },
+  roundedx: { deps: ['sdRoundedX'],            argKeys: ['w', 'r'],            call: (q, a) => `sdRoundedX(${q}, ${a.w}, ${a.r})` },
+  pie:      { deps: ['sdPie'],                 argKeys: ['r', 'angle'],        call: (q, a) => `sdPie(${q}, ${a.angle}, ${a.r})` },
+  vesica:   { deps: ['sdVesica'],              argKeys: ['r', 'd'],            call: (q, a) => `sdVesica(${q}, ${a.r}, ${a.d})` },
 };
+// int-valued params (snapped, not lerped): sides / points
+const INT_PARAMS = new Set(['n']);
 
 const BLEND_LABEL = {
   union: 'union', subtract: 'subtract', intersect: 'intersect', xor: 'xor',
@@ -227,33 +245,49 @@ const BLEND_LABEL = {
   smooth_intersect: 'smooth intersect', replace: 'replace',
 };
 
-function blendExpr(blend, a, b, k) {
-  const kk = F(k ?? 0.25);
+function blendExpr(blend, a, b, kExpr) {
   switch (blend) {
     case 'union': return `min(${a}, ${b})`;
     case 'subtract': return `max(${a}, -${b})`;
     case 'intersect': return `max(${a}, ${b})`;
     case 'xor': return `max(min(${a}, ${b}), -max(${a}, ${b}))`;
-    case 'smooth_union': return `smin(${a}, ${b}, ${kk})`;
-    case 'smooth_subtract': return `smax(${a}, -${b}, ${kk})`;
-    case 'smooth_intersect': return `smax(${a}, ${b}, ${kk})`;
+    case 'smooth_union': return `smin(${a}, ${b}, ${kExpr})`;
+    case 'smooth_subtract': return `smax(${a}, -${b}, ${kExpr})`;
+    case 'smooth_intersect': return `smax(${a}, ${b}, ${kExpr})`;
     case 'replace': return b;
     default: return `min(${a}, ${b})`;
   }
 }
 
 const safeIdent = (id) => 'custom_' + String(id).replace(/[^a-zA-Z0-9_]/g, '_');
+const isSmooth = (b) => b && b.startsWith('smooth');
+const needsSmax = (b) => b === 'smooth_subtract' || b === 'smooth_intersect';
+const needsSmin = (b) => b === 'smooth_union';
 
-// ── scene body emitter ──────────────────────────────────────────
+// ── traversal helpers shared by preview & export ───────────────
+
+/** every item (shape/group/custom/modifier) gets a slot, DFS order */
+function assignSlots(scene) {
+  const map = new Map();
+  let i = 0;
+  const walk = (items) => {
+    for (const item of items) {
+      map.set(item.id, i++);
+      if (item.children) walk(item.children);
+    }
+  };
+  walk(scene.items || []);
+  return map;
+}
 
 function emitItems(items, lines, indent, base, acc, ctx) {
   const ind = '  '.repeat(indent);
-  const coordOps = ctx.coordOps; // per container-scope list
+  const coordOps = ctx.coordOps;
 
   for (const item of items) {
     if (!item.visible) continue;
+    const slot = ctx.slots.get(item.id);
     const T = item.transform || { x: 0, y: 0, rotation: 0, scale: 1 };
-    const rotRad = RAD(T.rotation || 0);
     const scale = T.scale || 1;
 
     // ── modifiers ───────────────────────────────────────────────
@@ -261,9 +295,10 @@ function emitItems(items, lines, indent, base, acc, ctx) {
       const def = getShape(item.shapeId);
       if (def?.modifier === 'field') {
         lines.push(`${ind}// ── ${item.name} · field modifier ──`);
+        const tExpr = ctx.uniforms ? `u_p[${slot}].x` : F(item.params?.t ?? item.params?.r ?? 0.1);
         if (def.mod === 'invert') lines.push(`${ind}${acc} = -${acc};`);
-        else if (def.mod === 'onion') lines.push(`${ind}${acc} = abs(${acc}) - ${F(item.params?.t ?? 0.09)};`);
-        else if (def.mod === 'round') lines.push(`${ind}${acc} = ${acc} - ${F(item.params?.r ?? 0.12)};`);
+        else if (def.mod === 'onion') lines.push(`${ind}${acc} = abs(${acc}) - ${tExpr};`);
+        else if (def.mod === 'round') lines.push(`${ind}${acc} = ${acc} - ${tExpr};`);
       } else if (def?.modifier === 'coord') {
         coordOps.push({ type: def.mod, name: item.name });
         lines.push(`${ind}// ▼ ${item.name} — mirrors every layer below this one`);
@@ -272,16 +307,14 @@ function emitItems(items, lines, indent, base, acc, ctx) {
     }
 
     // ── selectable items (shape / group / custom) ───────────────
-    const idx = ctx.withSelection ? ctx.sel++ : -1;
     const vc = ctx.vc++;
     const q = `q${vc}`;
     const dv = `d${vc}`;
     const blend = item.blend || 'union';
-    const k = item.k ?? 0.25;
+    const smoothNote = isSmooth(blend) ? ` · k=${ctx.uniforms ? 'u_k' : F(item.k ?? 0.25)}` : '';
     const blendName = BLEND_LABEL[blend] || blend;
-    const smoothNote = blend.startsWith('smooth') ? ` · k=${F(k)}` : '';
+    const kExpr = ctx.uniforms ? `u_k[${slot}]` : F(item.k ?? 0.25);
 
-    // local frame: mirror (coord mods) → translate → rotate → unscale
     lines.push(`${ind}// ── ${item.name} · ${blendName}${smoothNote} ──`);
     lines.push(`${ind}vec2 ${q} = ${base};`);
     for (const op of coordOps) {
@@ -289,76 +322,106 @@ function emitItems(items, lines, indent, base, acc, ctx) {
       else if (op.type === 'mirrorY') lines.push(`${ind}${q}.y = abs(${q}.y);   // ${op.name}`);
       else if (op.type === 'quad') lines.push(`${ind}${q} = abs(${q});   // ${op.name}`);
     }
-    lines.push(`${ind}${q} -= vec2(${F(T.x)}, ${F(T.y)});`);
-    if (Math.abs(rotRad) > 1e-6) { lines.push(`${ind}${q} = rot2(${q}, ${F(-rotRad)});`); ctx.helpers.add('rot2'); }
-    if (Math.abs(scale - 1) > 1e-6) lines.push(`${ind}${q} /= ${F(scale)};`);
 
+    // local frame
     if (item.kind === 'group') {
+      // groups are pure containers: children already live in world space
       const gd = `gd${vc}`;
       lines.push(`${ind}float ${gd} = 1e9;`);
       const childCtx = { ...ctx, coordOps: [] };
       emitItems(item.children || [], lines, indent + 1, q, gd, childCtx);
-      if (item.height) lines.push(`${ind}${gd} -= ${F(item.height)};   // group height`);
-      lines.push(`${ind}${acc} = ${blendExpr(blend, acc, gd, k)};`);
-      if (ctx.withSelection) lines.push(`${ind}if (u_selIndex == ${idx}) g_selD = ${gd};`);
-      if (blend.startsWith('smooth')) ctx.helpers.add(blend.endsWith('intersect') ? 'smax' : 'smin');
+      lines.push(`${ind}${acc} = ${blendExpr(blend, acc, gd, kExpr)};`);
+      if (ctx.uniforms) {
+        lines.push(`${ind}if (u_sel[${slot}] > 0.5 && abs(${gd}) < abs(g_selD)) g_selD = ${gd};`);
+      }
+      if (needsSmin(blend)) ctx.helpers.add('smin');
+      if (needsSmax(blend)) { ctx.helpers.add('smax'); ctx.helpers.add('smin'); }
       continue;
     }
 
-    // shape or custom
+    // transform into the layer's frame
+    if (ctx.uniforms) {
+      lines.push(`${ind}${q} -= u_t[${slot}].xy;`);
+      lines.push(`${ind}${q} = mat2(u_r[${slot}].x, -u_r[${slot}].y, u_r[${slot}].y, u_r[${slot}].x) * ${q};`);  // world → layer frame = R(-θ)
+      lines.push(`${ind}${q} /= u_t[${slot}].z;`);
+    } else {
+      lines.push(`${ind}${q} -= vec2(${F(T.x)}, ${F(T.y)});`);
+      if (Math.abs(RAD(T.rotation || 0)) > 1e-6) { lines.push(`${ind}${q} = rot2(${q}, ${F(RAD(T.rotation || 0))});`); ctx.helpers.add('rot2'); }
+      if (Math.abs(scale - 1) > 1e-6) lines.push(`${ind}${q} /= ${F(scale)};`);
+    }
+
+    // shape / custom call
     let sdfExpr;
     if (item.kind === 'custom') {
       const fname = safeIdent(item.id);
       ctx.customFns.push({ name: fname, layerName: item.name, code: item.params?.code ?? 'return 1e9;' });
+      scanCustomCode(item.params?.code, ctx.helpers);
       sdfExpr = `${fname}(${q})`;
     } else {
       const g = SHAPE_GLSL[item.shapeId];
-      if (!g) { lines.push(`${ind}// !! unknown shape "${item.shapeId}" — skipped (distance = infinity)`); sdfExpr = '1e9'; }
-      else { for (const dep of g.deps) ctx.helpers.add(dep); sdfExpr = g.call(q, item.params || {}); }
+      if (!g) {
+        lines.push(`${ind}// !! unknown shape "${item.shapeId}" — skipped (distance = infinity)`);
+        sdfExpr = '1e9';
+      } else {
+        for (const dep of g.deps) ctx.helpers.add(dep);
+        // param expressions: uniform slots or literals
+        const a = {};
+        if (ctx.uniforms) {
+          const def = getShape(item.shapeId);
+          const keys = def?.params.map(p => p.key) ?? [];
+          for (let i = 0; i < keys.length; i++) {
+            a[keys[i]] = (i < 4 ? `u_p` : `u_q`) + `[${slot}].` + 'xyzw'[i % 4];
+          }
+        } else {
+          const p = item.params || {};
+          for (const key of g.argKeys ?? Object.keys(p)) {
+            if (key === 'n') a[key] = F(Math.round(p.n)); else a[key] = F(p[key]);
+          }
+        }
+        sdfExpr = g.call(q, a);
+      }
     }
+
     let dline = `${ind}float ${dv} = ${sdfExpr}`;
-    if (Math.abs(scale - 1) > 1e-6) dline += ` * ${F(scale)}`;   // un-do the unscale for the metric
-    if (item.height) dline += ` - ${F(item.height)}`;            // height / grow
+    if (ctx.uniforms) {
+      dline += ` * u_t[${slot}].z - u_t[${slot}].w`;
+    } else {
+      if (Math.abs(scale - 1) > 1e-6) dline += ` * ${F(scale)}`;
+      if (item.height) dline += ` - ${F(item.height)}`;
+    }
     lines.push(dline + ';');
 
-    lines.push(`${ind}${acc} = ${blendExpr(blend, acc, dv, k)};`);
-    if (ctx.withSelection) lines.push(`${ind}if (u_selIndex == ${idx}) g_selD = ${dv};`);
-    if (blend.startsWith('smooth')) ctx.helpers.add(blend.endsWith('intersect') ? 'smax' : (blend === 'smooth_subtract' ? 'smax' : 'smin'));
+    lines.push(`${ind}${acc} = ${blendExpr(blend, acc, dv, kExpr)};`);
+    if (ctx.uniforms) {
+      lines.push(`${ind}if (u_sel[${slot}] > 0.5 && abs(${dv}) < abs(g_selD)) g_selD = ${dv};`);
+    }
+    if (needsSmin(blend)) ctx.helpers.add('smin');
+    if (needsSmax(blend)) { ctx.helpers.add('smax'); ctx.helpers.add('smin'); }
   }
 }
 
-function emitSceneBody(scene, { withSelection }) {
+function emitSceneBody(scene, { mode }) {
+  const uniforms = mode === 'preview';
   const lines = [];
   const ctx = {
-    sel: 0,
     vc: 0,
-    withSelection,
+    uniforms,
     helpers: new Set(),
     customFns: [],
     coordOps: [],
+    slots: assignSlots(scene),
   };
   lines.push('float sceneSDF(vec2 p) {');
   lines.push('  float d = 1e9;');
   emitItems(scene.items || [], lines, 1, 'p', 'd', ctx);
   lines.push('  return d;');
   lines.push('}');
-  return { body: lines.join('\n'), helpers: ctx.helpers, customFns: ctx.customFns };
+  return { body: lines.join('\n'), helpers: ctx.helpers, customFns: ctx.customFns, slotCount: ctx.slots.size };
 }
 
-// selection indices — SAME traversal order as the emitter
-export function selectionIndices(scene) {
-  const map = new Map();
-  let i = 0;
-  const walk = (items) => {
-    for (const item of items || []) {
-      if (!item.visible) continue;
-      if (item.kind === 'modifier') continue;
-      map.set(item.id, i++);
-      if (item.kind === 'group') walk(item.children);
-    }
-  };
-  walk(scene.items);
-  return map;
+/** id → slot map for the preview renderer */
+export function slotMap(scene) {
+  return assignSlots(scene);
 }
 
 const hexToVec3 = (hex) => {
@@ -368,33 +431,43 @@ const hexToVec3 = (hex) => {
   return `vec3(${F(r)}, ${F(g)}, ${F(b)})`;
 };
 
-function emitCustomFns(customFns, ind = '') {
+const indentCode = (code, pad) => code.split('\n').map(l => pad + l).join('\n');
+
+function emitCustomFns(customFns) {
   return customFns.map(({ name, layerName, code }) =>
     `// custom layer "${layerName}" — written by the user, evaluated locally in the layer's frame\nfloat ${name}(vec2 p) {\n${indentCode(code.trimEnd(), '  ')}\n}`
   ).join('\n\n');
 }
-const indentCode = (code, pad) => code.split('\n').map(l => pad + l).join('\n');
 
 // ── live-preview fragment shader ────────────────────────────────
 
 export function buildPreviewFragment(scene) {
-  const { body, helpers, customFns } = emitSceneBody(scene, { withSelection: true });
+  const { body, helpers, customFns, slotCount } = emitSceneBody(scene, { mode: 'preview' });
   const helperCode = collectHelpers(helpers);
   const customCode = emitCustomFns(customFns);
+  const N = Math.max(1, slotCount);
   return `precision highp float;
 
 uniform vec2  u_resolution;
 uniform vec2  u_center;
-uniform float u_scale;        // pixels per world unit
-uniform float u_falloff;      // gradient range (world units)
-uniform float u_steps;        // gradient steps (0 = smooth)
-uniform float u_lineEvery;    // contour spacing in world units (0 = off)
-uniform float u_lineStrength; // 0..1
+uniform float u_scale;          // pixels per world unit
+uniform float u_falloff;        // gradient range (world units)
+uniform float u_steps;          // gradient steps (0 = smooth)
+uniform float u_lineEvery;      // contour spacing in world units (0 = off)
+uniform float u_lineStrength;   // 0..1
+uniform float u_boundaryAlpha;  // strength of the d = 0 line
 uniform vec3  u_inside;
 uniform vec3  u_outside;
 uniform vec3  u_accent;
 uniform vec3  u_line;
-uniform int   u_selIndex;     // -1 = nothing selected
+
+// per-layer uniforms (slot = DFS order)
+uniform vec4  u_t[${N}];        // x, y, scale, height
+uniform vec2  u_r[${N}];        // cos(rot), sin(rot)
+uniform vec4  u_p[${N}];        // params 0..3
+uniform vec4  u_q[${N}];        // params 4..7
+uniform float u_k[${N}];        // blend radius (smooth ops)
+uniform float u_sel[${N}];      // 1.0 when the layer is selected
 
 float g_selD = 1e9;
 
@@ -420,7 +493,7 @@ void main() {
   }
 
   vec3 base = mix(u_inside, u_outside, t);
-  base *= mix(0.90, 1.07, t);            // subtle depth shading
+  base *= mix(0.88, 1.08, t);            // subtle depth shading
 
   // contour lines every u_lineEvery world units
   if (u_lineEvery > 0.0001) {
@@ -430,25 +503,26 @@ void main() {
     base = mix(base, u_line, line * u_lineStrength);
   }
 
-  // boundary (the d = 0 line)
-  float boundary = 1.0 - smoothstep(px * 1.1, px * 3.1, abs(d));
-  base = mix(base, u_accent, boundary * 0.85);
+  // boundary (the d = 0 line) — bold when nothing is selected, quiet when focused
+  float boundary = 1.0 - smoothstep(px * 1.15, px * 3.1, abs(d));
+  base = mix(base, u_accent, boundary * u_boundaryAlpha);
+  base = mix(base, u_accent, boundary * boundary * 0.22);   // hot core
 
-  // selection highlight — "magic magenta"
-  if (u_selIndex >= 0) {
+  // selection highlight — nearest selected layer's boundary
+  if (g_selD < 1e8) {
     float sel = 1.0 - smoothstep(px * 1.3, px * 3.6, abs(g_selD));
-    base = mix(base, vec3(0.914, 0.471, 0.976), sel * 0.85);
+    base = mix(base, vec3(0.45, 0.88, 0.98), sel * 0.9);
   }
 
-  // vignette
-  vec2 vd = (gl_FragCoord.xy / u_resolution - 0.5) * vec2(1.35, 1.05);
-  base *= 1.0 - dot(vd, vd) * 0.38;
+  // vignette — pulls corners back so the field reads as artwork
+  vec2 vd = (gl_FragCoord.xy / u_resolution - 0.5) * vec2(1.3, 1.05);
+  base *= 1.0 - dot(vd, vd) * 0.52;
 
   gl_FragColor = vec4(base, 1.0);
 }`;
 }
 
-// ── export code ─────────────────────────────────────────────────
+// ── export code (literal, readable) ─────────────────────────────
 
 const GLSL_HEADER = (scene) => `// ═════════════════════════════════════════════════════════════
 //  SDF Magician · "${scene.name || 'Untitled Scene'}"
@@ -458,14 +532,37 @@ const GLSL_HEADER = (scene) => `// ═══════════════
 //  Sign convention: NEGATIVE inside, POSITIVE outside.
 //  Units are world units; the canvas shows roughly [-2.4, 2.4].
 //
-//  Technique credit: many distance primitives here are adapted
-//  from Inigo Quilez's wonderful SDF list (iquilezles.org/articles/distfunctions2d)
+//  Many distance primitives are adapted from Inigo Quilez's
+//  wonderful list: https://iquilezles.org/articles/distfunctions2d
 // ═════════════════════════════════════════════════════════════
 
 `;
 
+/** mechanical GLSL→HLSL (SM5) port of the export output; keeps the code readable */
+function portGlslToHlsl(src) {
+  let out = src;
+  // column-major mat2 → row-major shim preserves GLSL semantics exactly
+  const shim = '// Auto-ported from GLSL to HLSL (SM5): vecN→floatN, mat2→glslMat2.\n// glslMat2 reproduces GLSL\'s column-major constructor semantics exactly.\nfloat2x2 glslMat2(float a, float b, float c, float d) { return float2x2(a, c, b, d); }\n\n';
+  // strip the GLSL-only header comment line about porting? keep header; insert shim after it
+  const headerEnd = out.indexOf('\n\n');
+  out = out.slice(0, headerEnd + 2) + shim + out.slice(headerEnd + 2);
+  out = out
+    .replace(/\bmat2\s*\(/g, 'glslMat2(')
+    .replace(/\bvec2\b/g, 'float2')
+    .replace(/\bvec3\b/g, 'float3')
+    .replace(/\bvec4\b/g, 'float4')
+    .replace(/\bivec2\b/g, 'int2')
+    .replace(/\bivec3\b/g, 'int3');
+  out = out
+    .replace(/\bmix\s*\(/g, 'lerp(')
+    .replace(/\bfract\s*\(/g, 'frac(')
+    .replace(/\bmod\s*\(/g, 'fmod(')
+    .replace(/\biTime\b/g, '_Time.y');
+  return out;
+}
+
 export function buildExport(scene, target = 'glsl') {
-  const { body, helpers, customFns } = emitSceneBody(scene, { withSelection: false });
+  const { body, helpers, customFns } = emitSceneBody(scene, { mode: 'export' });
   const helperCode = collectHelpers(helpers);
   const customCode = emitCustomFns(customFns);
   const parts = [GLSL_HEADER(scene)];
@@ -480,10 +577,10 @@ const vec3 INSIDE  = ${hexToVec3(scene.colors?.inside)};
 const vec3 OUTSIDE = ${hexToVec3(scene.colors?.outside)};
 const vec3 ACCENT  = ${hexToVec3(scene.colors?.accent)};
 const vec3 LINE    = ${hexToVec3(scene.colors?.line)};
-const float FALLOFF = ${F(scene.contour?.falloff ?? 2.5)};
-const float STEPS   = ${F(scene.contour?.steps ?? 14)};   // 0 = smooth
-const float LINE_EVERY = ${F(scene.contour?.lineEvery ?? 0.5)};
-const float LINE_STRENGTH = ${F(scene.contour?.lineStrength ?? 0.4)};
+const float FALLOFF = ${F(scene.contour?.falloff ?? 2.1)};
+const float STEPS   = ${F(scene.contour?.steps ?? 16)};   // 0 = smooth
+const float LINE_EVERY = ${F(scene.contour?.lineEvery ?? 0.32)};
+const float LINE_STRENGTH = ${F(scene.contour?.lineStrength ?? 0.55)};
 
 void mainImage(out vec4 fragColor, in vec2 fragCoord) {
   vec2 p = (fragCoord - 0.5 * iResolution.xy) / iResolution.y * 5.0;
@@ -498,12 +595,12 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     t = (fl + smoothstep(0.5 - aa, 0.5 + aa, f - fl)) / STEPS;
   }
   vec3 col = mix(INSIDE, OUTSIDE, t);
-  col *= mix(0.90, 1.07, t);
+  col *= mix(0.88, 1.08, t);
   if (LINE_EVERY > 0.0001) {
     float g = abs(fract(d / LINE_EVERY + 0.5) - 0.5) * LINE_EVERY;
     col = mix(col, LINE, (1.0 - smoothstep(px * 0.8, px * 2.4, g)) * LINE_STRENGTH);
   }
-  col = mix(col, ACCENT, (1.0 - smoothstep(px * 1.1, px * 3.1, abs(d))) * 0.85);
+  col = mix(col, ACCENT, (1.0 - smoothstep(px * 1.15, px * 3.1, abs(d))) * 0.55);
   fragColor = vec4(col, 1.0);
 }
 `);
@@ -520,5 +617,8 @@ float sceneSDF3D(vec3 p) {
 `);
   }
 
+  if (target === 'hlsl') {
+    return portGlslToHlsl(parts.join('\n'));
+  }
   return parts.join('\n');
 }
